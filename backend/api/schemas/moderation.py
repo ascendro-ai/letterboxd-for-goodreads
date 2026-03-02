@@ -39,5 +39,6 @@ class ModerationResult(BaseModel):
     """Internal model returned by the moderation check — not exposed to clients."""
 
     is_flagged: bool
+    is_borderline: bool = False
     categories: list[str]
     confidence: float

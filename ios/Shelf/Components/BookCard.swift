@@ -40,6 +40,17 @@ struct BookCard: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityDescription)
+    }
+
+    private var accessibilityDescription: String {
+        var parts = [book.title]
+        if let author = book.authors.first?.name { parts.append("by \(author)") }
+        if showRating, let rating = book.averageRating {
+            parts.append("rated \(String(format: "%.1f", rating)) out of 5")
+        }
+        return parts.joined(separator: ", ")
     }
 }
 

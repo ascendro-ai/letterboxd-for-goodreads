@@ -2,13 +2,14 @@
 Content moderation service.
 
 Provides:
-  - AI moderation via OpenAI Moderation API (check_review_content)
+  - AI moderation via OpenAI Moderation API + Perspective API (check_review_content)
   - Community flagging (flag_review)
   - Flag count query (get_flag_count)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from uuid import UUID
 
@@ -22,21 +23,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-# Threshold above which we consider a category flagged
+# Content with confidence above MODERATION_THRESHOLD is rejected
 MODERATION_THRESHOLD = 0.7
+# Content between BORDERLINE_THRESHOLD and MODERATION_THRESHOLD is saved but queued
+BORDERLINE_THRESHOLD = 0.4
 
 
-async def check_review_content(text: str) -> ModerationResult:
-    """Run text through OpenAI Moderation API.
+async def _noop_result() -> ModerationResult:
+    return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
 
-    On failure (network error, API down, missing key), logs the error and
-    returns a passing result so users are not blocked by moderation downtime.
-    """
+
+async def _check_openai(text: str) -> ModerationResult:
+    """Run text through OpenAI Moderation API."""
     settings = get_settings()
-
-    if not settings.openai_api_key:
-        logger.warning("OpenAI API key not configured — skipping moderation check")
-        return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -63,8 +62,13 @@ async def check_review_content(text: str) -> ModerationResult:
             if score > MODERATION_THRESHOLD:
                 flagged_categories.append(category)
 
+        is_borderline = (
+            not flagged_categories and max_confidence > BORDERLINE_THRESHOLD
+        )
+
         return ModerationResult(
             is_flagged=len(flagged_categories) > 0,
+            is_borderline=is_borderline,
             categories=flagged_categories,
             confidence=max_confidence,
         )
@@ -84,6 +88,91 @@ async def check_review_content(text: str) -> ModerationResult:
     except (KeyError, IndexError) as e:
         logger.error("Unexpected moderation API response format: %s", str(e))
         return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
+
+
+async def _check_perspective(text: str) -> ModerationResult:
+    """Secondary moderation check via Google Perspective API.
+
+    Checks for TOXICITY, SEVERE_TOXICITY, IDENTITY_ATTACK, INSULT, THREAT.
+    """
+    settings = get_settings()
+
+    if not settings.perspective_api_key:
+        return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze",
+                params={"key": settings.perspective_api_key},
+                json={
+                    "comment": {"text": text},
+                    "requestedAttributes": {
+                        "TOXICITY": {},
+                        "SEVERE_TOXICITY": {},
+                        "IDENTITY_ATTACK": {},
+                        "INSULT": {},
+                        "THREAT": {},
+                    },
+                    "languages": ["en"],
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        flagged_categories = []
+        max_score = 0.0
+
+        for attr_name, attr_data in data.get("attributeScores", {}).items():
+            score = attr_data["summaryScore"]["value"]
+            if score > max_score:
+                max_score = score
+            if score > MODERATION_THRESHOLD:
+                flagged_categories.append(attr_name.lower())
+
+        is_borderline = not flagged_categories and max_score > BORDERLINE_THRESHOLD
+
+        return ModerationResult(
+            is_flagged=len(flagged_categories) > 0,
+            is_borderline=is_borderline,
+            categories=flagged_categories,
+            confidence=max_score,
+        )
+
+    except Exception as e:
+        logger.error("Perspective API error: %s", str(e))
+        return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
+
+
+async def check_review_content(text: str) -> ModerationResult:
+    """Run text through moderation — OpenAI primary, Perspective secondary.
+
+    Content is flagged if EITHER service flags it (union of signals).
+    On failure of either service, the other still runs independently.
+    """
+    settings = get_settings()
+
+    openai_task = _check_openai(text) if settings.openai_api_key else _noop_result()
+    perspective_task = (
+        _check_perspective(text) if settings.perspective_api_key else _noop_result()
+    )
+
+    openai_result, perspective_result = await asyncio.gather(openai_task, perspective_task)
+
+    all_categories = list(set(openai_result.categories + perspective_result.categories))
+    is_flagged = openai_result.is_flagged or perspective_result.is_flagged
+    is_borderline = (
+        not is_flagged
+        and (openai_result.is_borderline or perspective_result.is_borderline)
+    )
+    confidence = max(openai_result.confidence, perspective_result.confidence)
+
+    return ModerationResult(
+        is_flagged=is_flagged,
+        is_borderline=is_borderline,
+        categories=all_categories,
+        confidence=confidence,
+    )
 
 
 async def flag_review(

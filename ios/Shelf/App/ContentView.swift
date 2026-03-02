@@ -2,6 +2,8 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var selectedTab: Tab = .feed
+    @Environment(DeepLinkHandler.self) private var deepLinkHandler
+    @State private var deepLinkBookID: UUID?
 
     enum Tab: String, CaseIterable {
         case feed, search, log, notifications, profile
@@ -38,13 +40,30 @@ struct ContentView: View {
     }
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            ForEach(Tab.allCases, id: \.self) { tab in
-                tabContent(for: tab)
-                    .tabItem {
-                        Label(tab.title, systemImage: selectedTab == tab ? tab.selectedIcon : tab.icon)
-                    }
-                    .tag(tab)
+        VStack(spacing: 0) {
+            OfflineBannerView()
+
+            TabView(selection: $selectedTab) {
+                ForEach(Tab.allCases, id: \.self) { tab in
+                    tabContent(for: tab)
+                        .tabItem {
+                            Label(tab.title, systemImage: selectedTab == tab ? tab.selectedIcon : tab.icon)
+                        }
+                        .tag(tab)
+                }
+            }
+        }
+        .onChange(of: deepLinkHandler.pendingBookID) { _, bookID in
+            if let bookID {
+                deepLinkBookID = bookID
+                selectedTab = .feed
+                deepLinkHandler.clearPending()
+            }
+        }
+        .onChange(of: deepLinkHandler.pendingSearchQuery) { _, query in
+            if query != nil {
+                selectedTab = .search
+                deepLinkHandler.clearPending()
             }
         }
     }
@@ -55,6 +74,9 @@ struct ContentView: View {
         case .feed:
             NavigationStack {
                 FeedView()
+                    .navigationDestination(item: $deepLinkBookID) { bookID in
+                        BookDetailView(bookID: bookID)
+                    }
             }
         case .search:
             NavigationStack {

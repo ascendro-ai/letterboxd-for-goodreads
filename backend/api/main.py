@@ -54,17 +54,23 @@ def create_app() -> FastAPI:
 
     # Register routers
     from backend.api.routes import (
+        admin,
         auth,
         books,
+        challenges,
         discover,
         export,
         feed,
         import_,
         moderation,
+        notifications,
+        series,
         shelves,
+        stats,
         user_books,
         users,
         waitlist,
+        webhooks,
     )
 
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
@@ -78,6 +84,12 @@ def create_app() -> FastAPI:
     app.include_router(waitlist.router, prefix="/api/v1", tags=["waitlist"])
     app.include_router(export.router, prefix="/api/v1", tags=["export"])
     app.include_router(discover.router, prefix="/api/v1/me/discover", tags=["discover"])
+    app.include_router(webhooks.router, prefix="/api/v1", tags=["webhooks"])
+    app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+    app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
+    app.include_router(series.router, prefix="/api/v1", tags=["series"])
+    app.include_router(challenges.router, prefix="/api/v1", tags=["challenges"])
+    app.include_router(stats.router, prefix="/api/v1", tags=["stats"])
 
     @app.get("/health")
     async def health() -> dict[str, str]:

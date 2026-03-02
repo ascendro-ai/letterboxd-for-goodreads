@@ -183,21 +183,20 @@ class TestR2Uploader:
 
 
 class TestFetchCovers:
-    @pytest.mark.asyncio
-    async def test_rejects_tiny_images(self):
+    def test_rejects_tiny_images(self):
         """Images smaller than 1KB should be rejected as placeholders."""
         from pipeline.cover_processing.fetch_covers import MIN_IMAGE_BYTES
 
         assert MIN_IMAGE_BYTES == 1024
-        # A tiny 1x1 pixel image would be ~100 bytes — well under the limit
+        # Verify a tiny image would be under the limit
+        tiny_image = _make_test_image(width=1, height=1)
+        assert len(tiny_image) < MIN_IMAGE_BYTES
 
-    @pytest.mark.asyncio
-    async def test_google_books_daily_limit(self):
+    def test_google_books_daily_limit(self):
         """Google Books counter should respect daily limit."""
-        counter = {"count": 999}
         from pipeline.config import GoogleBooksConfig
 
         config = GoogleBooksConfig(api_key="test", daily_limit=1000)
-        assert counter["count"] < config.daily_limit
-        counter["count"] += 1
-        assert counter["count"] >= config.daily_limit
+        # Counter at 999 is under limit, at 1000 is at/over limit
+        assert 999 < config.daily_limit
+        assert 1000 >= config.daily_limit

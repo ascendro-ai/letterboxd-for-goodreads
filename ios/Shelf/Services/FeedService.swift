@@ -9,7 +9,7 @@ final class FeedService {
 
     // MARK: - Feed
 
-    func getFeed(cursor: String? = nil, limit: Int = 20) async throws -> PaginatedResponse<FeedItem> {
+    func getFeed(cursor: String? = nil, limit: Int = 20) async throws -> FeedResponse {
         var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
         if let cursor { queryItems.append(URLQueryItem(name: "cursor", value: cursor)) }
         return try await api.request(.get, path: "/feed", queryItems: queryItems)

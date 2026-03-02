@@ -6,6 +6,7 @@ from uuid import UUID
 
 from backend.api.deps import DB, CurrentUser
 from backend.api.errors import AppError
+from backend.api.model_stubs import ReviewFlag
 from backend.api.schemas.common import PaginatedResponse
 from backend.api.schemas.user_books import LogBookRequest, UpdateBookRequest, UserBookResponse
 from backend.services import user_book_service
@@ -22,7 +23,7 @@ async def log_book(
     current_user: CurrentUser,
 ) -> UserBookResponse:
     """Log a book: set status, rate, and review."""
-    # Run moderation check on review text before saving
+    moderation_result = None
     if request.review_text:
         moderation_result = await check_review_content(request.review_text)
         if moderation_result.is_flagged:
@@ -31,7 +32,25 @@ async def log_book(
                 code="REVIEW_FLAGGED",
                 message="Your review was flagged for potentially violating community guidelines.",
             )
-    return await user_book_service.log_book(db, current_user.id, request)
+
+    result = await user_book_service.log_book(db, current_user.id, request)
+
+    # If borderline, auto-create a review flag for manual review
+    if moderation_result and moderation_result.is_borderline:
+        flag = ReviewFlag(
+            flagger_user_id=current_user.id,
+            user_book_id=result.id,
+            reason="other",
+            description=(
+                f"Auto-flagged by AI moderation (confidence: {moderation_result.confidence:.2f}, "
+                f"categories: {', '.join(moderation_result.categories) or 'none'})"
+            ),
+            status="pending",
+        )
+        db.add(flag)
+        await db.flush()
+
+    return result
 
 
 @router.patch("/me/books/{user_book_id}", response_model=UserBookResponse)
@@ -42,7 +61,7 @@ async def update_book(
     current_user: CurrentUser,
 ) -> UserBookResponse:
     """Update a logged book's status, rating, or review."""
-    # Run moderation check on review text before saving
+    moderation_result = None
     if request.review_text:
         moderation_result = await check_review_content(request.review_text)
         if moderation_result.is_flagged:
@@ -51,7 +70,24 @@ async def update_book(
                 code="REVIEW_FLAGGED",
                 message="Your review was flagged for potentially violating community guidelines.",
             )
-    return await user_book_service.update_book(db, current_user.id, user_book_id, request)
+
+    result = await user_book_service.update_book(db, current_user.id, user_book_id, request)
+
+    if moderation_result and moderation_result.is_borderline:
+        flag = ReviewFlag(
+            flagger_user_id=current_user.id,
+            user_book_id=result.id,
+            reason="other",
+            description=(
+                f"Auto-flagged by AI moderation (confidence: {moderation_result.confidence:.2f}, "
+                f"categories: {', '.join(moderation_result.categories) or 'none'})"
+            ),
+            status="pending",
+        )
+        db.add(flag)
+        await db.flush()
+
+    return result
 
 
 @router.delete("/me/books/{user_book_id}", status_code=status.HTTP_200_OK)

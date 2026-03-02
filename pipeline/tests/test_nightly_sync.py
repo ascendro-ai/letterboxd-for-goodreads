@@ -41,8 +41,7 @@ class TestRecentChangesParsing:
 
 
 class TestSyncState:
-    @pytest.mark.asyncio
-    async def test_state_creation(self):
+    def test_state_creation(self):
         """Sync state should be created if it doesn't exist."""
         from pipeline.models import SyncState
 
@@ -53,9 +52,9 @@ class TestSyncState:
         )
         assert state.sync_type == "nightly_ol"
         assert state.last_synced_date == "2024/01/15"
+        assert state.last_synced_offset == 0
 
-    @pytest.mark.asyncio
-    async def test_state_resumption(self):
+    def test_state_resumption(self):
         """Sync should resume from last synced date + 1 day."""
         from datetime import date, timedelta
 
@@ -156,12 +155,13 @@ class TestLiveFallback:
         assert "12345" in result["cover_ol_ids"]
         assert "OL1234A" in result["author_ol_ids"]
 
-    @pytest.mark.asyncio
-    async def test_search_returns_empty_without_args(self):
+    def test_search_returns_empty_without_args(self):
         """search_and_import with no args should return empty list."""
+        import asyncio
+
         from pipeline.sync.live_fallback import LiveFallback
 
         mock_session = AsyncMock()
         fallback = LiveFallback(mock_session)
-        result = await fallback.search_and_import()
+        result = asyncio.get_event_loop().run_until_complete(fallback.search_and_import())
         assert result == []

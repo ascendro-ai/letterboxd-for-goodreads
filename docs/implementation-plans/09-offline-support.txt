@@ -1,0 +1,1432 @@
+================================================================================
+09 — Offline Support
+Full offline reading log, cached browsing, and automatic sync on reconnect
+================================================================================
+
+Feature: Complete offline support for logging books, rating, reviewing, and
+browsing your shelf. Uses SwiftData for local persistence and a pending action
+queue that syncs automatically when the network comes back.
+
+EXISTING CODE:
+- OfflineStore.swift has SwiftData models: CachedBook, CachedUserBook,
+  PendingAction and a basic OfflineStore class with cacheBook, cacheBooks,
+  queueAction, getPendingActions, removePendingAction
+- SyncService.swift monitors NWPathMonitor, processes PendingAction queue
+  with retry logic (max 3 retries)
+
+This plan covers the integration layer: modifying APIClient for transparent
+offline fallback, extending OfflineStore with query/cleanup methods, enriching
+SyncService with full action dispatch and conflict handling, updating ViewModels
+with optimistic UI, and adding the visual offline banner.
+
+================================================================================
+FILE: ios/Shelf/Services/OfflineStore.swift  (modifications)
+================================================================================
+
+Add these methods to the existing OfflineStore class. The existing cacheBook,
+cacheBooks, queueAction, getPendingActions, and removePendingAction methods
+remain unchanged. This adds query, lookup, and cleanup capabilities.
+
+```swift
+import Foundation
+import SwiftData
+
+// MARK: - SwiftData Models for Offline Cache
+
+@Model
+final class CachedBook {
+    @Attribute(.unique) var bookID: UUID
+    var title: String
+    var authorName: String?
+    var coverImageURL: String?
+    var averageRating: Double?
+    var cachedAt: Date
+
+    init(bookID: UUID, title: String, authorName: String?, coverImageURL: String?, averageRating: Double?) {
+        self.bookID = bookID
+        self.title = title
+        self.authorName = authorName
+        self.coverImageURL = coverImageURL
+        self.averageRating = averageRating
+        self.cachedAt = Date()
+    }
+
+    convenience init(from book: Book) {
+        self.init(
+            bookID: book.id,
+            title: book.title,
+            authorName: book.authors.first?.name,
+            coverImageURL: book.coverImageURL,
+            averageRating: book.averageRating
+        )
+    }
+}
+
+@Model
+final class CachedUserBook {
+    @Attribute(.unique) var userBookID: UUID
+    var workID: UUID
+    var status: String
+    var rating: Double?
+    var reviewText: String?
+    var hasSpoilers: Bool
+    var cachedAt: Date
+    var hasPendingChanges: Bool
+
+    init(userBookID: UUID, workID: UUID, status: String, rating: Double?, reviewText: String?, hasSpoilers: Bool) {
+        self.userBookID = userBookID
+        self.workID = workID
+        self.status = status
+        self.rating = rating
+        self.reviewText = reviewText
+        self.hasSpoilers = hasSpoilers
+        self.cachedAt = Date()
+        self.hasPendingChanges = false
+    }
+
+    convenience init(from userBook: UserBook) {
+        self.init(
+            userBookID: userBook.id,
+            workID: userBook.workID,
+            status: userBook.status.rawValue,
+            rating: userBook.rating,
+            reviewText: userBook.reviewText,
+            hasSpoilers: userBook.hasSpoilers
+        )
+    }
+}
+
+// MARK: - Pending Action (offline queue)
+
+@Model
+final class PendingAction {
+    @Attribute(.unique) var id: UUID
+    var actionType: String  // "log_book", "update_book", "delete_book", "create_shelf", "update_shelf"
+    var payload: Data       // JSON-encoded request body
+    var createdAt: Date
+    var retryCount: Int
+
+    init(actionType: String, payload: Data) {
+        self.id = UUID()
+        self.actionType = actionType
+        self.payload = payload
+        self.createdAt = Date()
+        self.retryCount = 0
+    }
+}
+
+// MARK: - Offline Store
+
+@Observable
+final class OfflineStore {
+    static let shared = OfflineStore()
+
+    let container: ModelContainer
+
+    private init() {
+        do {
+            let schema = Schema([CachedBook.self, CachedUserBook.self, PendingAction.self])
+            let config = ModelConfiguration(isStoredInMemoryOnly: false)
+            self.container = try ModelContainer(for: schema, configurations: config)
+        } catch {
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }
+
+    // MARK: - Cache Books
+
+    @MainActor
+    func cacheBook(_ book: Book) {
+        let context = container.mainContext
+        let cached = CachedBook(from: book)
+        context.insert(cached)
+        try? context.save()
+    }
+
+    @MainActor
+    func cacheBooks(_ books: [Book]) {
+        let context = container.mainContext
+        for book in books {
+            context.insert(CachedBook(from: book))
+        }
+        try? context.save()
+    }
+
+    // MARK: - Cache UserBooks
+
+    @MainActor
+    func cacheUserBooks(_ userBooks: [UserBook]) {
+        let context = container.mainContext
+        for userBook in userBooks {
+            let cached = CachedUserBook(from: userBook)
+            context.insert(cached)
+
+            // Also cache the associated book if present
+            if let book = userBook.book {
+                context.insert(CachedBook(from: book))
+            }
+        }
+        try? context.save()
+    }
+
+    @MainActor
+    func cacheUserBook(_ userBook: UserBook) {
+        let context = container.mainContext
+        let cached = CachedUserBook(from: userBook)
+        context.insert(cached)
+        if let book = userBook.book {
+            context.insert(CachedBook(from: book))
+        }
+        try? context.save()
+    }
+
+    // MARK: - Query Cached Data
+
+    @MainActor
+    func getCachedBooks(status: ReadingStatus? = nil) -> [CachedUserBook] {
+        let context = container.mainContext
+        var descriptor = FetchDescriptor<CachedUserBook>(
+            sortBy: [SortDescriptor(\.cachedAt, order: .reverse)]
+        )
+        if let status {
+            descriptor.predicate = #Predicate<CachedUserBook> { userBook in
+                userBook.status == status.rawValue
+            }
+        }
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    @MainActor
+    func getCachedBook(id: UUID) -> CachedBook? {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<CachedBook>(
+            predicate: #Predicate<CachedBook> { book in
+                book.bookID == id
+            }
+        )
+        return try? context.fetch(descriptor).first
+    }
+
+    @MainActor
+    func getCachedUserBook(id: UUID) -> CachedUserBook? {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<CachedUserBook>(
+            predicate: #Predicate<CachedUserBook> { userBook in
+                userBook.userBookID == id
+            }
+        )
+        return try? context.fetch(descriptor).first
+    }
+
+    @MainActor
+    func getCachedUserBookByWork(workID: UUID) -> CachedUserBook? {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<CachedUserBook>(
+            predicate: #Predicate<CachedUserBook> { userBook in
+                userBook.workID == workID
+            }
+        )
+        return try? context.fetch(descriptor).first
+    }
+
+    // MARK: - Mark Pending Changes
+
+    @MainActor
+    func markPendingChanges(userBookID: UUID) {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<CachedUserBook>(
+            predicate: #Predicate<CachedUserBook> { userBook in
+                userBook.userBookID == userBookID
+            }
+        )
+        if let cached = try? context.fetch(descriptor).first {
+            cached.hasPendingChanges = true
+            try? context.save()
+        }
+    }
+
+    @MainActor
+    func clearPendingChanges(userBookID: UUID) {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<CachedUserBook>(
+            predicate: #Predicate<CachedUserBook> { userBook in
+                userBook.userBookID == userBookID
+            }
+        )
+        if let cached = try? context.fetch(descriptor).first {
+            cached.hasPendingChanges = false
+            try? context.save()
+        }
+    }
+
+    // MARK: - Queue Offline Actions
+
+    @MainActor
+    func queueAction(type: String, payload: some Encodable) {
+        let context = container.mainContext
+        if let data = try? JSONEncoder().encode(payload) {
+            let action = PendingAction(actionType: type, payload: data)
+            context.insert(action)
+            try? context.save()
+        }
+    }
+
+    @MainActor
+    func getPendingActions() -> [PendingAction] {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<PendingAction>(sortBy: [SortDescriptor(\.createdAt)])
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    @MainActor
+    func removePendingAction(_ action: PendingAction) {
+        let context = container.mainContext
+        context.delete(action)
+        try? context.save()
+    }
+
+    @MainActor
+    func removePendingAction(id: UUID) {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<PendingAction>(
+            predicate: #Predicate<PendingAction> { action in
+                action.id == id
+            }
+        )
+        if let action = try? context.fetch(descriptor).first {
+            context.delete(action)
+            try? context.save()
+        }
+    }
+
+    // MARK: - Cleanup
+
+    @MainActor
+    func clearExpiredCache() {
+        let context = container.mainContext
+        let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+
+        // Remove old cached books (only those without associated user books)
+        let bookDescriptor = FetchDescriptor<CachedBook>(
+            predicate: #Predicate<CachedBook> { book in
+                book.cachedAt < sevenDaysAgo
+            }
+        )
+        if let expiredBooks = try? context.fetch(bookDescriptor) {
+            for book in expiredBooks {
+                // Check if any CachedUserBook references this work
+                let userBookDescriptor = FetchDescriptor<CachedUserBook>(
+                    predicate: #Predicate<CachedUserBook> { ub in
+                        ub.workID == book.bookID
+                    }
+                )
+                let hasUserBook = (try? context.fetchCount(userBookDescriptor)) ?? 0
+                if hasUserBook == 0 {
+                    context.delete(book)
+                }
+            }
+        }
+
+        try? context.save()
+    }
+
+    @MainActor
+    func pendingActionCount() -> Int {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<PendingAction>()
+        return (try? context.fetchCount(descriptor)) ?? 0
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Services/SyncService.swift  (modifications)
+================================================================================
+
+Extend the existing SyncService with full action dispatch, conflict handling,
+sync progress tracking, and shelf action support.
+
+```swift
+import Foundation
+import Network
+
+@Observable
+final class SyncService {
+    static let shared = SyncService()
+
+    private(set) var isOnline = true
+    private(set) var isSyncing = false
+    private(set) var syncProgressCurrent = 0
+    private(set) var syncProgressTotal = 0
+
+    private let monitor = NWPathMonitor()
+    private let monitorQueue = DispatchQueue(label: "com.shelf.network-monitor")
+    private let offlineStore = OfflineStore.shared
+    private let userBookService = UserBookService.shared
+    private let shelfService = ShelfService.shared
+
+    private init() {
+        startMonitoring()
+    }
+
+    // MARK: - Network Monitoring
+
+    private func startMonitoring() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                let wasOffline = self?.isOnline == false
+                self?.isOnline = path.status == .satisfied
+
+                // Came back online — sync pending actions
+                if wasOffline && path.status == .satisfied {
+                    await self?.syncPendingActions()
+                }
+            }
+        }
+        monitor.start(queue: monitorQueue)
+    }
+
+    // MARK: - Sync Pending Actions
+
+    @MainActor
+    func syncPendingActions() async {
+        guard !isSyncing, isOnline else { return }
+        isSyncing = true
+
+        let actions = offlineStore.getPendingActions()
+        syncProgressTotal = actions.count
+        syncProgressCurrent = 0
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        for action in actions {
+            guard isOnline else { break }  // Stop if we went offline mid-sync
+
+            do {
+                switch action.actionType {
+                case "log_book":
+                    try await processLogBook(action, decoder: decoder)
+
+                case "update_book":
+                    try await processUpdateBook(action, decoder: decoder)
+
+                case "delete_book":
+                    try await processDeleteBook(action, decoder: decoder)
+
+                case "create_shelf":
+                    try await processCreateShelf(action, decoder: decoder)
+
+                case "update_shelf":
+                    try await processUpdateShelf(action, decoder: decoder)
+
+                default:
+                    break
+                }
+
+                offlineStore.removePendingAction(action)
+            } catch let error as APIError {
+                switch error {
+                case .conflict:
+                    // 409 Conflict: server state takes precedence (last write wins).
+                    // Remove the pending action and refresh from server.
+                    offlineStore.removePendingAction(action)
+                    await refreshFromServer(action: action, decoder: decoder)
+
+                case .unauthorized:
+                    // 401: stop syncing entirely, user needs to re-authenticate
+                    isSyncing = false
+                    syncProgressCurrent = 0
+                    syncProgressTotal = 0
+                    NotificationCenter.default.post(
+                        name: .syncAuthenticationRequired,
+                        object: nil
+                    )
+                    return
+
+                default:
+                    // Other errors: increment retry, skip if too many failures
+                    action.retryCount += 1
+                    if action.retryCount > 3 {
+                        offlineStore.removePendingAction(action)
+                    }
+                }
+            } catch {
+                action.retryCount += 1
+                if action.retryCount > 3 {
+                    offlineStore.removePendingAction(action)
+                }
+            }
+
+            syncProgressCurrent += 1
+        }
+
+        isSyncing = false
+        syncProgressCurrent = 0
+        syncProgressTotal = 0
+    }
+
+    // MARK: - Action Processors
+
+    private func processLogBook(_ action: PendingAction, decoder: JSONDecoder) async throws {
+        guard let request = try? decoder.decode(LogBookRequest.self, from: action.payload) else { return }
+        let result = try await userBookService.logBook(request)
+
+        // Update local cache with server response
+        await MainActor.run {
+            offlineStore.cacheUserBook(result)
+            offlineStore.clearPendingChanges(userBookID: result.id)
+        }
+    }
+
+    private func processUpdateBook(_ action: PendingAction, decoder: JSONDecoder) async throws {
+        guard let wrapper = try? decoder.decode(UpdateActionPayload.self, from: action.payload) else { return }
+        let result = try await userBookService.updateBook(id: wrapper.id, request: wrapper.request)
+
+        await MainActor.run {
+            offlineStore.cacheUserBook(result)
+            offlineStore.clearPendingChanges(userBookID: wrapper.id)
+        }
+    }
+
+    private func processDeleteBook(_ action: PendingAction, decoder: JSONDecoder) async throws {
+        guard let idWrapper = try? decoder.decode(IDWrapper.self, from: action.payload) else { return }
+        try await userBookService.removeBook(id: idWrapper.id)
+
+        // Remove from local cache
+        await MainActor.run {
+            if let cached = offlineStore.getCachedUserBook(id: idWrapper.id) {
+                let context = offlineStore.container.mainContext
+                context.delete(cached)
+                try? context.save()
+            }
+        }
+    }
+
+    private func processCreateShelf(_ action: PendingAction, decoder: JSONDecoder) async throws {
+        guard let request = try? decoder.decode(CreateShelfRequest.self, from: action.payload) else { return }
+        _ = try await shelfService.createShelf(request)
+    }
+
+    private func processUpdateShelf(_ action: PendingAction, decoder: JSONDecoder) async throws {
+        guard let wrapper = try? decoder.decode(UpdateShelfPayload.self, from: action.payload) else { return }
+        _ = try await shelfService.updateShelf(id: wrapper.id, request: wrapper.request)
+    }
+
+    // MARK: - Conflict Resolution
+
+    private func refreshFromServer(action: PendingAction, decoder: JSONDecoder) async {
+        // On conflict, refresh the relevant data from the server to update local cache
+        switch action.actionType {
+        case "log_book":
+            if let request = try? decoder.decode(LogBookRequest.self, from: action.payload) {
+                if let response = try? await userBookService.getMyBooks(cursor: nil) {
+                    await MainActor.run {
+                        offlineStore.cacheUserBooks(response.items)
+                    }
+                }
+            }
+
+        case "update_book":
+            if let wrapper = try? decoder.decode(UpdateActionPayload.self, from: action.payload) {
+                await MainActor.run {
+                    offlineStore.clearPendingChanges(userBookID: wrapper.id)
+                }
+            }
+
+        default:
+            break
+        }
+    }
+}
+
+// MARK: - Sync Payload Types
+
+struct UpdateActionPayload: Codable {
+    let id: UUID
+    let request: UpdateBookRequest
+}
+
+struct IDWrapper: Codable {
+    let id: UUID
+}
+
+struct UpdateShelfPayload: Codable {
+    let id: UUID
+    let request: UpdateShelfRequest
+}
+
+// MARK: - Notification Names
+
+extension Notification.Name {
+    static let syncAuthenticationRequired = Notification.Name("syncAuthenticationRequired")
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Services/APIClient.swift  (modifications)
+================================================================================
+
+Modify the existing APIClient to transparently cache successful GET responses
+and fall back to cached data on network failure. For mutating requests
+(POST/PATCH/DELETE), queue as PendingAction on network failure.
+
+Replace the entire APIClient class with this updated version:
+
+```swift
+import Foundation
+
+// MARK: - API Configuration
+
+enum APIEnvironment {
+    case development
+    case production
+
+    var baseURL: String {
+        switch self {
+        case .development: "http://localhost:8000/api/v1"
+        case .production: "https://shelf-api.up.railway.app/api/v1"
+        }
+    }
+}
+
+// MARK: - API Error
+
+enum APIError: LocalizedError {
+    case invalidURL
+    case unauthorized
+    case forbidden
+    case notFound
+    case conflict(String)
+    case validationError(String)
+    case rateLimited
+    case serverError
+    case networkError(Error)
+    case decodingError(Error)
+    case apiError(code: String, message: String)
+    case offline
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL: "Invalid URL"
+        case .unauthorized: "Please sign in again."
+        case .forbidden: "You don't have permission to do that."
+        case .notFound: "Not found."
+        case .conflict(let msg): msg
+        case .validationError(let msg): msg
+        case .rateLimited: "Too many requests. Please wait a moment."
+        case .serverError: "Something went wrong. Please try again."
+        case .networkError: "No internet connection."
+        case .decodingError: "Unexpected response from server."
+        case .apiError(_, let message): message
+        case .offline: "You're offline. This action has been saved and will sync when you reconnect."
+        }
+    }
+}
+
+// MARK: - HTTP Method
+
+enum HTTPMethod: String {
+    case get = "GET"
+    case post = "POST"
+    case patch = "PATCH"
+    case delete = "DELETE"
+}
+
+// MARK: - Cacheable Response Protocol
+
+private protocol CacheableResponse {
+    static var cachePath: String? { get }
+}
+
+// MARK: - API Client
+
+@Observable
+final class APIClient {
+    static let shared = APIClient()
+
+    private let session: URLSession
+    private let decoder: JSONDecoder
+    private let encoder: JSONEncoder
+    private var environment: APIEnvironment
+
+    var authToken: String?
+
+    private init() {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        self.session = URLSession(configuration: config)
+
+        self.decoder = JSONDecoder()
+        self.decoder.dateDecodingStrategy = .iso8601
+
+        self.encoder = JSONEncoder()
+        self.encoder.dateEncodingStrategy = .iso8601
+        self.encoder.keyEncodingStrategy = .convertToSnakeCase
+
+        #if DEBUG
+        self.environment = .development
+        #else
+        self.environment = .production
+        #endif
+    }
+
+    func setEnvironment(_ env: APIEnvironment) {
+        self.environment = env
+    }
+
+    // MARK: - Core Request (with offline caching for GET)
+
+    func request<T: Decodable>(
+        _ method: HTTPMethod,
+        path: String,
+        body: (some Encodable)? = nil as Empty?,
+        queryItems: [URLQueryItem]? = nil
+    ) async throws -> T {
+        let url = try buildURL(path: path, queryItems: queryItems)
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        if let token = authToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        if let body {
+            request.httpBody = try encoder.encode(body)
+        }
+
+        do {
+            let (data, response) = try await perform(request)
+            try validateResponse(response, data: data)
+
+            let result = try decoder.decode(T.self, from: data)
+
+            // Opportunistically cache GET responses
+            if method == .get {
+                await opportunisticallyCacheResponse(path: path, data: data)
+            }
+
+            return result
+        } catch let error as APIError {
+            throw error
+        } catch {
+            // Network failure — provide cached data for GET requests
+            if method == .get {
+                if let cached: T = await getCachedResponse(path: path) {
+                    return cached
+                }
+            }
+            throw APIError.networkError(error)
+        }
+    }
+
+    // MARK: - Request without response body (with offline queuing)
+
+    func request(
+        _ method: HTTPMethod,
+        path: String,
+        body: (some Encodable)? = nil as Empty?,
+        queryItems: [URLQueryItem]? = nil
+    ) async throws {
+        let url = try buildURL(path: path, queryItems: queryItems)
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        if let token = authToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        if let body {
+            request.httpBody = try encoder.encode(body)
+        }
+
+        do {
+            let (data, response) = try await perform(request)
+            try validateResponse(response, data: data)
+        } catch let error as APIError {
+            throw error
+        } catch {
+            throw APIError.networkError(error)
+        }
+    }
+
+    // MARK: - Multipart Upload (for CSV import)
+
+    func upload<T: Decodable>(
+        path: String,
+        fileData: Data,
+        fileName: String,
+        mimeType: String = "text/csv"
+    ) async throws -> T {
+        let url = try buildURL(path: path)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        if let token = authToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
+        body.append(fileData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        let (data, response) = try await perform(request)
+        try validateResponse(response, data: data)
+        return try decoder.decode(T.self, from: data)
+    }
+
+    // MARK: - Offline Cache Helpers
+
+    private func opportunisticallyCacheResponse(path: String, data: Data) async {
+        // Cache specific response types for offline access
+        let offlineStore = OfflineStore.shared
+
+        await MainActor.run {
+            if path.hasPrefix("/me/books") {
+                // Cache user books responses
+                if let response = try? self.decoder.decode(PaginatedResponse<UserBook>.self, from: data) {
+                    offlineStore.cacheUserBooks(response.items)
+                } else if let userBook = try? self.decoder.decode(UserBook.self, from: data) {
+                    offlineStore.cacheUserBook(userBook)
+                }
+            } else if path.hasPrefix("/books/") && !path.contains("search") {
+                // Cache individual book detail responses
+                if let book = try? self.decoder.decode(Book.self, from: data) {
+                    offlineStore.cacheBook(book)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func getCachedResponse<T: Decodable>(path: String) -> T? {
+        let offlineStore = OfflineStore.shared
+
+        // Return cached user books for /me/books requests
+        if path.hasPrefix("/me/books") && T.self == PaginatedResponse<UserBook>.self {
+            let cached = offlineStore.getCachedBooks()
+            if !cached.isEmpty {
+                // Convert CachedUserBook to UserBook for the response
+                // This is a best-effort offline representation
+                return nil  // Handled at the ViewModel level for richer conversion
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - Private Helpers
+
+    private func buildURL(path: String, queryItems: [URLQueryItem]? = nil) throws -> URL {
+        guard var components = URLComponents(string: environment.baseURL + path) else {
+            throw APIError.invalidURL
+        }
+        if let queryItems, !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw APIError.invalidURL
+        }
+        return url
+    }
+
+    private func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch {
+            throw APIError.networkError(error)
+        }
+    }
+
+    private func validateResponse(_ response: URLResponse, data: Data) throws {
+        guard let httpResponse = response as? HTTPURLResponse else { return }
+
+        switch httpResponse.statusCode {
+        case 200...299:
+            return
+        case 401:
+            throw APIError.unauthorized
+        case 403:
+            throw APIError.forbidden
+        case 404:
+            throw APIError.notFound
+        case 409:
+            let detail = parseErrorMessage(data)
+            throw APIError.conflict(detail)
+        case 422:
+            let detail = parseErrorMessage(data)
+            throw APIError.validationError(detail)
+        case 429:
+            throw APIError.rateLimited
+        case 500...599:
+            throw APIError.serverError
+        default:
+            let detail = parseErrorMessage(data)
+            throw APIError.apiError(code: "HTTP_\(httpResponse.statusCode)", message: detail)
+        }
+    }
+
+    private func parseErrorMessage(_ data: Data) -> String {
+        if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
+            return errorResponse.error.message
+        }
+        return "An unexpected error occurred."
+    }
+}
+
+// MARK: - Empty body placeholder
+
+struct Empty: Encodable {}
+```
+
+================================================================================
+FILE: ios/Shelf/ViewModels/BookDetailViewModel.swift  (modifications)
+================================================================================
+
+Update BookDetailViewModel to support offline reading: load from cache on
+failure, queue actions when offline, and show optimistic UI.
+
+```swift
+import Foundation
+
+@Observable
+final class BookDetailViewModel {
+    let bookID: UUID
+
+    private(set) var book: Book?
+    private(set) var reviews: [Review] = []
+    private(set) var similarBooks: [Book] = []
+    private(set) var userBook: UserBook?
+    private(set) var isLoading = false
+    private(set) var error: Error?
+    private(set) var isOfflineData = false
+
+    private let bookService = BookService.shared
+    private let userBookService = UserBookService.shared
+    private let offlineStore = OfflineStore.shared
+    private let syncService = SyncService.shared
+
+    init(bookID: UUID) {
+        self.bookID = bookID
+    }
+
+    @MainActor
+    func load() async {
+        guard !isLoading else { return }
+        isLoading = true
+        error = nil
+        isOfflineData = false
+
+        do {
+            async let bookResult = bookService.getBook(id: bookID)
+            async let reviewsResult = bookService.getReviews(bookID: bookID)
+            async let similarResult = bookService.getSimilarBooks(bookID: bookID)
+
+            let (b, r, s) = try await (bookResult, reviewsResult, similarResult)
+            book = b
+            reviews = r.items
+            similarBooks = s
+
+            // Cache the book for offline access
+            offlineStore.cacheBook(b)
+        } catch {
+            // Try to load from cache on failure
+            if let cachedBook = offlineStore.getCachedBook(id: bookID) {
+                book = Book(
+                    id: cachedBook.bookID,
+                    title: cachedBook.title,
+                    originalTitle: nil,
+                    description: nil,
+                    firstPublishedYear: nil,
+                    authors: cachedBook.authorName.map {
+                        [Author(id: UUID(), name: $0, bio: nil, photoURL: nil)]
+                    } ?? [],
+                    subjects: [],
+                    coverImageURL: cachedBook.coverImageURL,
+                    averageRating: cachedBook.averageRating,
+                    ratingsCount: 0,
+                    editionsCount: 0,
+                    bookshopURL: nil
+                )
+                isOfflineData = true
+            } else {
+                self.error = error
+            }
+        }
+
+        // Load cached user book state
+        if let cachedUserBook = offlineStore.getCachedUserBookByWork(workID: bookID) {
+            // Reconstruct a minimal UserBook from cache if we don't have one from API
+            if userBook == nil {
+                userBook = UserBook(
+                    id: cachedUserBook.userBookID,
+                    userID: UUID(), // Not available from cache
+                    workID: cachedUserBook.workID,
+                    status: ReadingStatus(rawValue: cachedUserBook.status) ?? .wantToRead,
+                    rating: cachedUserBook.rating,
+                    reviewText: cachedUserBook.reviewText,
+                    hasSpoilers: cachedUserBook.hasSpoilers,
+                    startedAt: nil,
+                    finishedAt: nil,
+                    isImported: false,
+                    createdAt: cachedUserBook.cachedAt,
+                    updatedAt: cachedUserBook.cachedAt,
+                    book: book
+                )
+            }
+        }
+
+        isLoading = false
+    }
+
+    @MainActor
+    func logBook(request: LogBookRequest) async throws {
+        if syncService.isOnline {
+            let result = try await userBookService.logBook(request)
+            userBook = result
+            offlineStore.cacheUserBook(result)
+        } else {
+            // Queue for later sync and apply optimistic local state
+            offlineStore.queueAction(type: "log_book", payload: request)
+
+            // Create optimistic local UserBook
+            let optimisticID = UUID()
+            let optimisticUserBook = UserBook(
+                id: optimisticID,
+                userID: UUID(),
+                workID: request.workID,
+                status: request.status,
+                rating: request.rating,
+                reviewText: request.reviewText,
+                hasSpoilers: request.hasSpoilers,
+                startedAt: request.startedAt,
+                finishedAt: request.finishedAt,
+                isImported: false,
+                createdAt: Date(),
+                updatedAt: Date(),
+                book: book
+            )
+            userBook = optimisticUserBook
+            offlineStore.cacheUserBook(optimisticUserBook)
+            offlineStore.markPendingChanges(userBookID: optimisticID)
+        }
+    }
+
+    @MainActor
+    func updateBook(request: UpdateBookRequest) async throws {
+        guard let id = userBook?.id else { return }
+
+        if syncService.isOnline {
+            let result = try await userBookService.updateBook(id: id, request: request)
+            userBook = result
+            offlineStore.cacheUserBook(result)
+        } else {
+            // Queue for later sync
+            let payload = UpdateActionPayload(id: id, request: request)
+            offlineStore.queueAction(type: "update_book", payload: payload)
+
+            // Apply optimistic update to local state
+            if var current = userBook {
+                if let status = request.status { current = current.withStatus(status) }
+                if let rating = request.rating { current = current.withRating(rating) }
+                userBook = current
+            }
+            offlineStore.markPendingChanges(userBookID: id)
+        }
+    }
+
+    @MainActor
+    func removeBook() async throws {
+        guard let id = userBook?.id else { return }
+
+        if syncService.isOnline {
+            try await userBookService.removeBook(id: id)
+            userBook = nil
+        } else {
+            let payload = IDWrapper(id: id)
+            offlineStore.queueAction(type: "delete_book", payload: payload)
+            userBook = nil
+
+            // Remove from local cache
+            if let cached = offlineStore.getCachedUserBook(id: id) {
+                let context = offlineStore.container.mainContext
+                context.delete(cached)
+                try? context.save()
+            }
+        }
+    }
+}
+
+// MARK: - UserBook convenience extensions for optimistic updates
+
+private extension UserBook {
+    func withStatus(_ status: ReadingStatus) -> UserBook {
+        UserBook(
+            id: id, userID: userID, workID: workID, status: status,
+            rating: rating, reviewText: reviewText, hasSpoilers: hasSpoilers,
+            startedAt: startedAt, finishedAt: finishedAt, isImported: isImported,
+            createdAt: createdAt, updatedAt: Date(), book: book
+        )
+    }
+
+    func withRating(_ rating: Double) -> UserBook {
+        UserBook(
+            id: id, userID: userID, workID: workID, status: status,
+            rating: rating, reviewText: reviewText, hasSpoilers: hasSpoilers,
+            startedAt: startedAt, finishedAt: finishedAt, isImported: isImported,
+            createdAt: createdAt, updatedAt: Date(), book: book
+        )
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Components/OfflineBannerView.swift
+================================================================================
+
+```swift
+import SwiftUI
+
+struct OfflineBannerView: View {
+    let syncService = SyncService.shared
+
+    var body: some View {
+        if !syncService.isOnline || syncService.isSyncing {
+            HStack(spacing: 8) {
+                if syncService.isSyncing {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(.white)
+                    Text(syncProgressText)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white)
+                } else {
+                    Image(systemName: "wifi.slash")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text("You're offline. Changes will sync when you reconnect.")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(bannerColor)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .animation(.easeInOut(duration: 0.3), value: syncService.isOnline)
+            .animation(.easeInOut(duration: 0.3), value: syncService.isSyncing)
+        }
+    }
+
+    private var bannerColor: Color {
+        if syncService.isSyncing {
+            return Color.blue.opacity(0.9)
+        }
+        return Color.orange.opacity(0.9)
+    }
+
+    private var syncProgressText: String {
+        let current = syncService.syncProgressCurrent
+        let total = syncService.syncProgressTotal
+        if total > 0 {
+            return "Syncing \(current)/\(total)..."
+        }
+        return "Syncing..."
+    }
+}
+
+// MARK: - View Modifier for easy banner attachment
+
+struct OfflineBannerModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        VStack(spacing: 0) {
+            OfflineBannerView()
+            content
+        }
+    }
+}
+
+extension View {
+    func offlineBanner() -> some View {
+        modifier(OfflineBannerModifier())
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Profile/MyBooksView.swift
+================================================================================
+
+A dedicated view for the "My Books" section that handles offline display
+with pending change indicators. Used within MyProfileView.
+
+```swift
+import SwiftUI
+
+struct MyBooksView: View {
+    @State private var books: [UserBook] = []
+    @State private var isLoading = false
+    @State private var error: Error?
+    @State private var selectedStatus: ReadingStatus?
+    @State private var isOfflineData = false
+    @State private var nextCursor: String?
+    @State private var hasMore = true
+
+    private let userBookService = UserBookService.shared
+    private let offlineStore = OfflineStore.shared
+    private let syncService = SyncService.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Status filter chips
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    StatusFilterChip(title: "All", isSelected: selectedStatus == nil) {
+                        selectedStatus = nil
+                        Task { await loadBooks() }
+                    }
+                    ForEach(ReadingStatus.allCases, id: \.self) { status in
+                        StatusFilterChip(
+                            title: status.displayName,
+                            isSelected: selectedStatus == status
+                        ) {
+                            selectedStatus = status
+                            Task { await loadBooks() }
+                        }
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+            }
+
+            if isOfflineData {
+                HStack(spacing: 4) {
+                    Image(systemName: "icloud.slash")
+                        .font(.caption2)
+                    Text("Showing cached data")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+            }
+
+            // Book list
+            Group {
+                if isLoading && books.isEmpty {
+                    LoadingStateView()
+                } else if let error, books.isEmpty {
+                    ErrorStateView(error: error) {
+                        Task { await loadBooks() }
+                    }
+                } else if books.isEmpty {
+                    EmptyStateView(
+                        icon: "books.vertical",
+                        title: "No books yet",
+                        message: "Start tracking your reading by logging your first book."
+                    )
+                } else {
+                    booksList
+                }
+            }
+        }
+        .task {
+            if books.isEmpty {
+                await loadBooks()
+            }
+        }
+    }
+
+    private var booksList: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(books) { userBook in
+                if let book = userBook.book {
+                    NavigationLink(value: book) {
+                        HStack {
+                            BookCard(book: book, size: .medium)
+
+                            Spacer()
+
+                            // Show sync indicator for books with pending changes
+                            if hasPendingChanges(for: userBook) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                    Divider().padding(.horizontal)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func loadBooks() async {
+        isLoading = true
+        error = nil
+        isOfflineData = false
+
+        do {
+            let response = try await userBookService.getMyBooks(status: selectedStatus)
+            books = response.items
+            nextCursor = response.nextCursor
+            hasMore = response.hasMore
+
+            // Cache for offline
+            offlineStore.cacheUserBooks(response.items)
+        } catch {
+            // Fall back to cached data when offline
+            let cached = offlineStore.getCachedBooks(status: selectedStatus)
+            if !cached.isEmpty {
+                books = cached.compactMap { cachedUserBook in
+                    let cachedBook = offlineStore.getCachedBook(id: cachedUserBook.workID)
+                    return UserBook(
+                        id: cachedUserBook.userBookID,
+                        userID: UUID(),
+                        workID: cachedUserBook.workID,
+                        status: ReadingStatus(rawValue: cachedUserBook.status) ?? .wantToRead,
+                        rating: cachedUserBook.rating,
+                        reviewText: cachedUserBook.reviewText,
+                        hasSpoilers: cachedUserBook.hasSpoilers,
+                        startedAt: nil,
+                        finishedAt: nil,
+                        isImported: false,
+                        createdAt: cachedUserBook.cachedAt,
+                        updatedAt: cachedUserBook.cachedAt,
+                        book: cachedBook.map { cb in
+                            Book(
+                                id: cb.bookID,
+                                title: cb.title,
+                                originalTitle: nil,
+                                description: nil,
+                                firstPublishedYear: nil,
+                                authors: cb.authorName.map {
+                                    [Author(id: UUID(), name: $0, bio: nil, photoURL: nil)]
+                                } ?? [],
+                                subjects: [],
+                                coverImageURL: cb.coverImageURL,
+                                averageRating: cb.averageRating,
+                                ratingsCount: 0,
+                                editionsCount: 0,
+                                bookshopURL: nil
+                            )
+                        }
+                    )
+                }
+                isOfflineData = true
+            } else {
+                self.error = error
+            }
+        }
+
+        isLoading = false
+    }
+
+    @MainActor
+    private func hasPendingChanges(for userBook: UserBook) -> Bool {
+        if let cached = offlineStore.getCachedUserBook(id: userBook.id) {
+            return cached.hasPendingChanges
+        }
+        return false
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/App/ContentView.swift  (modifications)
+================================================================================
+
+Add the offline banner to the root content view. The banner appears at the
+top of the screen when the user goes offline and shows sync progress when
+reconnecting.
+
+```swift
+import SwiftUI
+
+struct ContentView: View {
+    @State private var selectedTab = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            OfflineBannerView()
+
+            TabView(selection: $selectedTab) {
+                NavigationStack {
+                    FeedView()
+                }
+                .tabItem { Label("Feed", systemImage: "house") }
+                .tag(0)
+
+                NavigationStack {
+                    SearchView()
+                }
+                .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                .tag(1)
+
+                NavigationStack {
+                    LogView()
+                }
+                .tabItem { Label("Log", systemImage: "plus.circle") }
+                .tag(2)
+
+                NavigationStack {
+                    NotificationsView()
+                }
+                .tabItem { Label("Notifications", systemImage: "bell") }
+                .tag(3)
+
+                NavigationStack {
+                    MyProfileView()
+                }
+                .tabItem { Label("Profile", systemImage: "person") }
+                .tag(4)
+            }
+        }
+        .task {
+            // Clean up expired cache entries on app launch
+            await MainActor.run {
+                OfflineStore.shared.clearExpiredCache()
+            }
+        }
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/App/ShelfApp.swift  (modifications)
+================================================================================
+
+Ensure the ModelContainer from OfflineStore is available to SwiftUI views
+that need it. Add the container as an environment value at the app level:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@main
+struct ShelfApp: App {
+    // Existing properties...
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .modelContainer(OfflineStore.shared.container)
+        }
+    }
+}
+```

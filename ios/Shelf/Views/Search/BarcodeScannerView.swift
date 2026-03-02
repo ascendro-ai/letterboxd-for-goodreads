@@ -1,27 +1,68 @@
 import SwiftUI
 import AVFoundation
+import VisionKit
 
 struct BarcodeScannerView: View {
     @Environment(\.dismiss) private var dismiss
-    let onScan: (String) -> Void
+    @State private var viewModel = BarcodeScannerViewModel()
+    @State private var showManualEntry = false
+    let onBookFound: (Book) -> Void
 
     var body: some View {
         NavigationStack {
             ZStack {
-                BarcodeScannerRepresentable(onScan: { code in
-                    onScan(code)
-                })
-                .ignoresSafeArea()
+                // Primary: VisionKit DataScanner (iOS 16+, requires hardware)
+                if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+                    DataScannerRepresentable { code in
+                        Task { await viewModel.processBarcode(code) }
+                    }
+                    .ignoresSafeArea()
+                } else {
+                    // Fallback: AVFoundation camera
+                    BarcodeScannerRepresentable { code in
+                        Task { await viewModel.processBarcode(code) }
+                    }
+                    .ignoresSafeArea()
+                }
 
+                // Overlay
                 VStack {
                     Spacer()
-                    Text("Point your camera at a book's barcode")
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
+
+                    if viewModel.isLookingUp {
+                        ProgressView("Looking up ISBN...")
+                            .padding()
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    } else if let error = viewModel.error {
+                        VStack(spacing: 8) {
+                            Text(error.localizedDescription)
+                                .font(.subheadline)
+                            Button("Try Again") { viewModel.reset() }
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .padding()
                         .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
-                        .padding(.bottom, 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    } else {
+                        Text("Point your camera at a book's barcode")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Capsule())
+                    }
+
+                    // Manual entry button
+                    Button {
+                        showManualEntry = true
+                    } label: {
+                        Text("Enter ISBN manually")
+                            .font(.subheadline)
+                            .foregroundStyle(.white)
+                    }
+                    .padding(.top, 8)
+                    .padding(.bottom, 40)
                 }
             }
             .navigationTitle("Scan Barcode")
@@ -30,12 +71,86 @@ struct BarcodeScannerView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        viewModel.isTorchOn.toggle()
+                        toggleTorch(viewModel.isTorchOn)
+                    } label: {
+                        Image(systemName: viewModel.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                    }
+                }
+            }
+            .onChange(of: viewModel.scannedBook) { _, book in
+                if let book {
+                    onBookFound(book)
+                    dismiss()
+                }
+            }
+            .sheet(isPresented: $showManualEntry) {
+                ManualISBNEntryView { book in
+                    showManualEntry = false
+                    onBookFound(book)
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private func toggleTorch(_ on: Bool) {
+        guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return }
+        try? device.lockForConfiguration()
+        device.torchMode = on ? .on : .off
+        device.unlockForConfiguration()
+    }
+}
+
+// MARK: - VisionKit DataScanner
+
+struct DataScannerRepresentable: UIViewControllerRepresentable {
+    let onScan: (String) -> Void
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(
+            recognizedDataTypes: [.barcode(symbologies: [.ean13, .ean8])],
+            isHighlightingEnabled: true
+        )
+        scanner.delegate = context.coordinator
+        return scanner
+    }
+
+    func updateUIViewController(_ controller: DataScannerViewController, context: Context) {
+        if !controller.isScanning {
+            try? controller.startScanning()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScan: onScan)
+    }
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        let onScan: (String) -> Void
+        private var hasScanned = false
+
+        init(onScan: @escaping (String) -> Void) {
+            self.onScan = onScan
+        }
+
+        func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
+            guard !hasScanned else { return }
+            for item in addedItems {
+                if case .barcode(let barcode) = item, let value = barcode.payloadStringValue {
+                    hasScanned = true
+                    AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+                    onScan(value)
+                    return
+                }
             }
         }
     }
 }
 
-// MARK: - UIKit Camera View
+// MARK: - AVFoundation Fallback
 
 struct BarcodeScannerRepresentable: UIViewControllerRepresentable {
     let onScan: (String) -> Void
@@ -94,8 +209,6 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         if captureSession.canAddOutput(output) {
             captureSession.addOutput(output)
             output.setMetadataObjectsDelegate(self, queue: .main)
-            // EAN-13 and EAN-8 cover ISBN barcodes on physical books.
-            // ISBN-13 is encoded as EAN-13; ISBN-10 predates EAN and is less common on newer books.
             output.metadataObjectTypes = [.ean13, .ean8]
         }
 

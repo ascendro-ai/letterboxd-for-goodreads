@@ -16,6 +16,7 @@ class UpdateProfileRequest(BaseModel):
     bio: str | None = Field(None, max_length=500)
     avatar_url: str | None = None
     favorite_books: list[UUID] | None = Field(None, max_length=4)
+    hide_reading_stats: bool | None = None
 
 
 class UserProfile(BaseModel):
@@ -29,6 +30,7 @@ class UserProfile(BaseModel):
     followers_count: int = 0
     following_count: int = 0
     is_following: bool = False
+    hide_reading_stats: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}

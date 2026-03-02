@@ -1,0 +1,1278 @@
+================================================================================
+12 — Collaborative Filtering Recommendations
+"People who rated this highly also rated..." and discovery endpoints
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/book_service.py  — get_similar_books() COMPLETE REWRITE
+────────────────────────────────────────────────────────────────────────────────
+
+Replace the existing get_similar_books stub with this implementation.
+This function lives in the existing book_service.py alongside the other
+book service functions. Only this function is shown; do not replace the
+rest of the file.
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.errors import AppError
+
+
+async def get_similar_books(
+    db: AsyncSession,
+    work_id: UUID,
+    user_id: UUID | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Find books similar to the given work using collaborative filtering.
+
+    Algorithm:
+    1. Find all users who rated the given work >= 4.0
+    2. Find all OTHER works those users also rated >= 4.0
+    3. Score each candidate: count_of_shared_high_raters * avg_rating_of_candidate
+    4. Exclude the source work
+    5. Exclude works the requesting user has already logged (if authenticated)
+    6. Return top N ordered by score DESC
+
+    Uses a single SQL query with CTEs for optimal database performance.
+    Returns a list of dicts matching the BookBrief response shape.
+    """
+    # Build the exclusion clause for already-read books
+    user_exclusion_clause = ""
+    params: dict = {"work_id": str(work_id), "limit": limit, "min_rating": 4.0}
+
+    if user_id is not None:
+        user_exclusion_clause = """
+            AND candidates.candidate_work_id NOT IN (
+                SELECT ub_excl.work_id
+                FROM user_books ub_excl
+                WHERE ub_excl.user_id = :user_id
+            )
+        """
+        params["user_id"] = str(user_id)
+
+    query = text(f"""
+        WITH high_raters AS (
+            -- Users who rated the target work >= 4.0
+            SELECT ub.user_id
+            FROM user_books ub
+            WHERE ub.work_id = :work_id
+              AND ub.rating >= :min_rating
+        ),
+        candidates AS (
+            -- Other works those users also rated highly
+            SELECT
+                ub2.work_id AS candidate_work_id,
+                COUNT(DISTINCT ub2.user_id) AS shared_rater_count,
+                AVG(ub2.rating) AS avg_rater_rating
+            FROM user_books ub2
+            INNER JOIN high_raters hr ON hr.user_id = ub2.user_id
+            WHERE ub2.work_id != :work_id
+              AND ub2.rating >= :min_rating
+            GROUP BY ub2.work_id
+            HAVING COUNT(DISTINCT ub2.user_id) >= 2
+        )
+        SELECT
+            w.id,
+            w.title,
+            w.original_title,
+            w.first_published_year,
+            w.cover_image_url,
+            w.average_rating,
+            w.ratings_count,
+            candidates.shared_rater_count,
+            candidates.avg_rater_rating,
+            (candidates.shared_rater_count * candidates.avg_rater_rating) AS score,
+            (
+                SELECT json_agg(json_build_object(
+                    'id', a.id,
+                    'name', a.name,
+                    'bio', a.bio,
+                    'photo_url', a.photo_url
+                ))
+                FROM work_authors wa
+                JOIN authors a ON a.id = wa.author_id
+                WHERE wa.work_id = w.id
+            ) AS authors
+        FROM candidates
+        INNER JOIN works w ON w.id = candidates.candidate_work_id
+        WHERE 1=1
+            {user_exclusion_clause}
+        ORDER BY score DESC, w.ratings_count DESC
+        LIMIT :limit
+    """)
+
+    result = await db.execute(query, params)
+    rows = result.mappings().all()
+
+    books = []
+    for row in rows:
+        authors_raw = row["authors"] or []
+        authors = [
+            {
+                "id": str(a["id"]),
+                "name": a["name"],
+                "bio": a.get("bio"),
+                "photo_url": a.get("photo_url"),
+            }
+            for a in authors_raw
+        ]
+
+        books.append({
+            "id": str(row["id"]),
+            "title": row["title"],
+            "original_title": row["original_title"],
+            "first_published_year": row["first_published_year"],
+            "cover_image_url": row["cover_image_url"],
+            "average_rating": float(row["average_rating"]) if row["average_rating"] else None,
+            "ratings_count": row["ratings_count"],
+            "authors": authors,
+            "subjects": [],
+            "description": None,
+            "editions_count": 0,
+            "bookshop_url": None,
+        })
+
+    return books
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/books.py  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+Update the existing similar books route handler to pass the current user's
+ID for filtering out already-read books. The route likely looks like this
+currently; replace it with:
+
+from __future__ import annotations
+
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.deps import get_current_user, get_db, get_optional_current_user
+from models import User
+from services import book_service, recommendation_service
+
+router = APIRouter()
+
+DB = Annotated[AsyncSession, Depends(get_db)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
+OptionalUser = Annotated[User | None, Depends(get_optional_current_user)]
+
+
+# ... existing routes (search, detail, isbn lookup, reviews) remain unchanged ...
+
+
+@router.get("/books/{book_id}/similar")
+async def get_similar_books(
+    book_id: UUID,
+    db: DB,
+    current_user: OptionalUser,
+    limit: int = Query(default=10, ge=1, le=50),
+) -> list[dict]:
+    """Get books similar to the given book based on collaborative filtering.
+    If the user is authenticated, their already-read books are excluded."""
+    user_id = current_user.id if current_user else None
+    return await book_service.get_similar_books(
+        db=db,
+        work_id=book_id,
+        user_id=user_id,
+        limit=limit,
+    )
+
+
+@router.get("/books/trending")
+async def get_trending_books(
+    db: DB,
+    limit: int = Query(default=20, ge=1, le=50),
+) -> list[dict]:
+    """Get trending books based on recent activity (last 48 hours)."""
+    return await recommendation_service.get_trending(db=db, limit=limit)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/users.py  (ADD RECOMMENDATIONS ENDPOINT)
+────────────────────────────────────────────────────────────────────────────────
+
+Add this endpoint to the existing users route file (or create a dedicated
+recommendations router — either works):
+
+@router.get("/me/recommendations")
+async def get_personalized_recommendations(
+    db: DB,
+    current_user: CurrentUser,
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    """Get personalized book recommendations based on the user's
+    highest-rated books. Returns the source book and similar books."""
+    return await recommendation_service.get_because_you_read(
+        db=db,
+        user_id=current_user.id,
+        limit=limit,
+    )
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/deps.py  (ADD OPTIONAL AUTH DEPENDENCY)
+────────────────────────────────────────────────────────────────────────────────
+
+If not already present, add this dependency function alongside get_current_user:
+
+async def get_optional_current_user(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    """Like get_current_user but returns None instead of raising 401
+    when no auth token is present. Useful for endpoints that work for
+    both authenticated and anonymous users."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    try:
+        return await get_current_user(request, db)
+    except Exception:
+        return None
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/recommendation_service.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import logging
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from services.book_service import get_similar_books
+
+logger = logging.getLogger(__name__)
+
+
+async def get_popular_this_week(
+    db: AsyncSession,
+    limit: int = 20,
+) -> list[dict]:
+    """Get works with the most 'read' status changes in the last 7 days.
+
+    Counts user_books where status='read' and updated_at is within the
+    last 7 days. Orders by count DESC to surface the most popular books.
+    """
+    query = text("""
+        WITH popular AS (
+            SELECT
+                ub.work_id,
+                COUNT(*) AS read_count
+            FROM user_books ub
+            WHERE ub.status = 'read'
+              AND ub.updated_at >= NOW() - INTERVAL '7 days'
+            GROUP BY ub.work_id
+            ORDER BY read_count DESC
+            LIMIT :limit
+        )
+        SELECT
+            w.id,
+            w.title,
+            w.original_title,
+            w.first_published_year,
+            w.cover_image_url,
+            w.average_rating,
+            w.ratings_count,
+            popular.read_count,
+            (
+                SELECT json_agg(json_build_object(
+                    'id', a.id,
+                    'name', a.name,
+                    'bio', a.bio,
+                    'photo_url', a.photo_url
+                ))
+                FROM work_authors wa
+                JOIN authors a ON a.id = wa.author_id
+                WHERE wa.work_id = w.id
+            ) AS authors
+        FROM popular
+        INNER JOIN works w ON w.id = popular.work_id
+        ORDER BY popular.read_count DESC
+    """)
+
+    result = await db.execute(query, {"limit": limit})
+    rows = result.mappings().all()
+    return _rows_to_book_list(rows)
+
+
+async def get_trending(
+    db: AsyncSession,
+    limit: int = 20,
+) -> list[dict]:
+    """Get works with the most activity (logs + reviews + status changes)
+    in the last 48 hours. Different from popular_this_week because it
+    includes all activity types, not just 'read' completions."""
+    query = text("""
+        WITH recent_activity AS (
+            -- User book status changes / new logs in last 48h
+            SELECT work_id, COUNT(*) AS activity_count
+            FROM user_books
+            WHERE updated_at >= NOW() - INTERVAL '48 hours'
+            GROUP BY work_id
+        ),
+        recent_reviews AS (
+            -- Reviews written in last 48h (review_text is not null)
+            SELECT work_id, COUNT(*) AS review_count
+            FROM user_books
+            WHERE updated_at >= NOW() - INTERVAL '48 hours'
+              AND review_text IS NOT NULL
+              AND review_text != ''
+            GROUP BY work_id
+        )
+        SELECT
+            w.id,
+            w.title,
+            w.original_title,
+            w.first_published_year,
+            w.cover_image_url,
+            w.average_rating,
+            w.ratings_count,
+            COALESCE(ra.activity_count, 0) AS activity_count,
+            COALESCE(rr.review_count, 0) AS review_count,
+            (COALESCE(ra.activity_count, 0) + COALESCE(rr.review_count, 0) * 2) AS trend_score,
+            (
+                SELECT json_agg(json_build_object(
+                    'id', a.id,
+                    'name', a.name,
+                    'bio', a.bio,
+                    'photo_url', a.photo_url
+                ))
+                FROM work_authors wa
+                JOIN authors a ON a.id = wa.author_id
+                WHERE wa.work_id = w.id
+            ) AS authors
+        FROM recent_activity ra
+        INNER JOIN works w ON w.id = ra.work_id
+        LEFT JOIN recent_reviews rr ON rr.work_id = ra.work_id
+        ORDER BY trend_score DESC, w.ratings_count DESC
+        LIMIT :limit
+    """)
+
+    result = await db.execute(query, {"limit": limit})
+    rows = result.mappings().all()
+    return _rows_to_book_list(rows)
+
+
+async def get_because_you_read(
+    db: AsyncSession,
+    user_id: UUID,
+    limit: int = 10,
+) -> dict:
+    """Pick the user's highest-rated book and find similar books.
+    Returns the source book info and the recommendations list.
+
+    If the user has no rated books, falls back to their most recently
+    logged 'read' book. If they have no books at all, returns empty."""
+
+    # Find the user's highest-rated book
+    source_query = text("""
+        SELECT
+            ub.work_id,
+            ub.rating,
+            w.title,
+            w.cover_image_url,
+            (
+                SELECT json_agg(json_build_object(
+                    'id', a.id,
+                    'name', a.name,
+                    'bio', a.bio,
+                    'photo_url', a.photo_url
+                ))
+                FROM work_authors wa
+                JOIN authors a ON a.id = wa.author_id
+                WHERE wa.work_id = w.id
+            ) AS authors
+        FROM user_books ub
+        INNER JOIN works w ON w.id = ub.work_id
+        WHERE ub.user_id = :user_id
+          AND ub.rating IS NOT NULL
+        ORDER BY ub.rating DESC, ub.updated_at DESC
+        LIMIT 1
+    """)
+
+    result = await db.execute(source_query, {"user_id": str(user_id)})
+    source_row = result.mappings().first()
+
+    if source_row is None:
+        # Fallback: most recently read book (even without rating)
+        fallback_query = text("""
+            SELECT
+                ub.work_id,
+                ub.rating,
+                w.title,
+                w.cover_image_url,
+                (
+                    SELECT json_agg(json_build_object(
+                        'id', a.id,
+                        'name', a.name,
+                        'bio', a.bio,
+                        'photo_url', a.photo_url
+                    ))
+                    FROM work_authors wa
+                    JOIN authors a ON a.id = wa.author_id
+                    WHERE wa.work_id = w.id
+                ) AS authors
+            FROM user_books ub
+            INNER JOIN works w ON w.id = ub.work_id
+            WHERE ub.user_id = :user_id
+              AND ub.status = 'read'
+            ORDER BY ub.updated_at DESC
+            LIMIT 1
+        """)
+        result = await db.execute(fallback_query, {"user_id": str(user_id)})
+        source_row = result.mappings().first()
+
+    if source_row is None:
+        return {
+            "source_book": None,
+            "recommendations": [],
+        }
+
+    work_id = source_row["work_id"]
+    source_authors = source_row["authors"] or []
+
+    similar = await get_similar_books(
+        db=db,
+        work_id=work_id,
+        user_id=user_id,
+        limit=limit,
+    )
+
+    return {
+        "source_book": {
+            "id": str(work_id),
+            "title": source_row["title"],
+            "cover_image_url": source_row["cover_image_url"],
+            "rating": float(source_row["rating"]) if source_row["rating"] else None,
+            "authors": [
+                {
+                    "id": str(a["id"]),
+                    "name": a["name"],
+                    "bio": a.get("bio"),
+                    "photo_url": a.get("photo_url"),
+                }
+                for a in source_authors
+            ],
+        },
+        "recommendations": similar,
+    }
+
+
+def _rows_to_book_list(rows) -> list[dict]:
+    """Convert raw SQL result rows to the BookBrief response shape."""
+    books = []
+    for row in rows:
+        authors_raw = row["authors"] or []
+        authors = [
+            {
+                "id": str(a["id"]),
+                "name": a["name"],
+                "bio": a.get("bio"),
+                "photo_url": a.get("photo_url"),
+            }
+            for a in authors_raw
+        ]
+
+        books.append({
+            "id": str(row["id"]),
+            "title": row["title"],
+            "original_title": row.get("original_title"),
+            "first_published_year": row.get("first_published_year"),
+            "cover_image_url": row["cover_image_url"],
+            "average_rating": float(row["average_rating"]) if row["average_rating"] else None,
+            "ratings_count": row["ratings_count"],
+            "authors": authors,
+            "subjects": [],
+            "description": None,
+            "editions_count": 0,
+            "bookshop_url": None,
+        })
+
+    return books
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/books.py  (UPDATE POPULAR ENDPOINT)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace the existing /books/popular handler with:
+
+@router.get("/books/popular")
+async def get_popular_books(
+    db: DB,
+    limit: int = Query(default=20, ge=1, le=50),
+) -> list[dict]:
+    """Get the most popular books this week, measured by the number of
+    users who marked them as 'read' in the last 7 days."""
+    return await recommendation_service.get_popular_this_week(db=db, limit=limit)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_recommendations.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta
+from decimal import Decimal
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models import Author, User, UserBook, Work, ReadingStatus, work_authors
+from services.book_service import get_similar_books
+from services.recommendation_service import (
+    get_because_you_read,
+    get_popular_this_week,
+    get_trending,
+)
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def authors(session: AsyncSession) -> list[Author]:
+    """Create a set of test authors."""
+    authors = []
+    for i in range(3):
+        author = Author(
+            id=uuid.uuid4(),
+            name=f"Author {i}",
+        )
+        session.add(author)
+        authors.append(author)
+    await session.commit()
+    return authors
+
+
+@pytest.fixture
+async def works(session: AsyncSession, authors: list[Author]) -> list[Work]:
+    """Create 5 test works with authors linked via the association table."""
+    works_list = []
+    for i in range(5):
+        work = Work(
+            id=uuid.uuid4(),
+            title=f"Book {i}: A Novel",
+            average_rating=Decimal("4.0"),
+            ratings_count=100 + i * 10,
+        )
+        session.add(work)
+        works_list.append(work)
+    await session.flush()
+
+    # Link each work to an author via the association table
+    for i, work in enumerate(works_list):
+        author = authors[i % len(authors)]
+        await session.execute(
+            work_authors.insert().values(
+                work_id=work.id, author_id=author.id
+            )
+        )
+
+    await session.commit()
+    return works_list
+
+
+@pytest.fixture
+async def users(session: AsyncSession) -> list[User]:
+    """Create 5 test users."""
+    users_list = []
+    for i in range(5):
+        user = User(
+            id=uuid.uuid4(),
+            username=f"testuser{i}_{uuid.uuid4().hex[:6]}",
+        )
+        session.add(user)
+        users_list.append(user)
+    await session.commit()
+    return users_list
+
+
+@pytest.fixture
+async def rated_books(
+    session: AsyncSession,
+    users: list[User],
+    works: list[Work],
+) -> list[UserBook]:
+    """Create ratings: Users 0-4 all rate Work 0 highly (4.5).
+    Users 0-3 also rate Work 1 highly (4.0-5.0).
+    Users 0-1 also rate Work 2 highly.
+    User 4 has read Work 3 (low rating).
+    This creates a clear collaborative signal: Work 0 -> Work 1."""
+    user_books = []
+    now = datetime.utcnow()
+
+    # All 5 users rate Work 0 at 4.5
+    for i, user in enumerate(users):
+        ub = UserBook(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            work_id=works[0].id,
+            status=ReadingStatus.READ,
+            rating=Decimal("4.5"),
+            updated_at=now,
+        )
+        session.add(ub)
+        user_books.append(ub)
+
+    # Users 0-3 rate Work 1 highly
+    for i in range(4):
+        rating = Decimal("4.0") + Decimal("0.5") * (i % 2)  # alternates 4.0, 4.5
+        ub = UserBook(
+            id=uuid.uuid4(),
+            user_id=users[i].id,
+            work_id=works[1].id,
+            status=ReadingStatus.READ,
+            rating=rating,
+            updated_at=now,
+        )
+        session.add(ub)
+        user_books.append(ub)
+
+    # Users 0-1 rate Work 2 highly
+    for i in range(2):
+        ub = UserBook(
+            id=uuid.uuid4(),
+            user_id=users[i].id,
+            work_id=works[2].id,
+            status=ReadingStatus.READ,
+            rating=Decimal("4.0"),
+            updated_at=now,
+        )
+        session.add(ub)
+        user_books.append(ub)
+
+    # User 4 rates Work 3 low (should not appear in recommendations)
+    ub = UserBook(
+        id=uuid.uuid4(),
+        user_id=users[4].id,
+        work_id=works[3].id,
+        status=ReadingStatus.READ,
+        rating=Decimal("2.0"),
+        updated_at=now,
+    )
+    session.add(ub)
+    user_books.append(ub)
+
+    await session.commit()
+    return user_books
+
+
+# ── Tests: get_similar_books ─────────────────────────────────────────────────
+
+
+class TestGetSimilarBooks:
+    """Tests for collaborative filtering similar books."""
+
+    async def test_returns_similar_books(
+        self, session: AsyncSession, works: list[Work], rated_books: list[UserBook]
+    ):
+        result = await get_similar_books(
+            db=session, work_id=works[0].id, user_id=None, limit=10
+        )
+
+        assert len(result) > 0
+        # Work 1 should be the top recommendation (4 shared high raters)
+        result_ids = [r["id"] for r in result]
+        assert str(works[1].id) in result_ids
+
+    async def test_excludes_source_work(
+        self, session: AsyncSession, works: list[Work], rated_books: list[UserBook]
+    ):
+        result = await get_similar_books(
+            db=session, work_id=works[0].id, user_id=None, limit=10
+        )
+
+        result_ids = [r["id"] for r in result]
+        assert str(works[0].id) not in result_ids
+
+    async def test_excludes_user_read_books(
+        self,
+        session: AsyncSession,
+        users: list[User],
+        works: list[Work],
+        rated_books: list[UserBook],
+    ):
+        # User 0 has already rated works 0, 1, 2
+        # When requesting similar to work 0 as user 0, works 1 and 2 should be excluded
+        result = await get_similar_books(
+            db=session,
+            work_id=works[0].id,
+            user_id=users[0].id,
+            limit=10,
+        )
+
+        result_ids = [r["id"] for r in result]
+        assert str(works[1].id) not in result_ids
+        assert str(works[2].id) not in result_ids
+
+    async def test_returns_empty_for_unrated_book(
+        self, session: AsyncSession, works: list[Work]
+    ):
+        # Work 4 has no ratings at all
+        result = await get_similar_books(
+            db=session, work_id=works[4].id, user_id=None, limit=10
+        )
+
+        assert result == []
+
+    async def test_returns_empty_for_nonexistent_book(
+        self, session: AsyncSession
+    ):
+        fake_id = uuid.uuid4()
+        result = await get_similar_books(
+            db=session, work_id=fake_id, user_id=None, limit=10
+        )
+
+        assert result == []
+
+    async def test_respects_limit(
+        self, session: AsyncSession, works: list[Work], rated_books: list[UserBook]
+    ):
+        result = await get_similar_books(
+            db=session, work_id=works[0].id, user_id=None, limit=1
+        )
+
+        assert len(result) <= 1
+
+    async def test_low_rated_books_excluded(
+        self, session: AsyncSession, works: list[Work], rated_books: list[UserBook]
+    ):
+        # Work 3 was rated 2.0 by user 4 — below the 4.0 threshold
+        result = await get_similar_books(
+            db=session, work_id=works[0].id, user_id=None, limit=10
+        )
+
+        result_ids = [r["id"] for r in result]
+        assert str(works[3].id) not in result_ids
+
+    async def test_response_shape(
+        self, session: AsyncSession, works: list[Work], rated_books: list[UserBook]
+    ):
+        result = await get_similar_books(
+            db=session, work_id=works[0].id, user_id=None, limit=10
+        )
+
+        assert len(result) > 0
+        book = result[0]
+        assert "id" in book
+        assert "title" in book
+        assert "authors" in book
+        assert "cover_image_url" in book
+        assert "average_rating" in book
+        assert "ratings_count" in book
+
+
+# ── Tests: get_popular_this_week ─────────────────────────────────────────────
+
+
+class TestGetPopularThisWeek:
+
+    async def test_returns_popular_books(
+        self, session: AsyncSession, users: list[User], works: list[Work]
+    ):
+        now = datetime.utcnow()
+
+        # Create recent reads: 4 users read Work 0, 2 users read Work 1
+        for i in range(4):
+            ub = UserBook(
+                id=uuid.uuid4(),
+                user_id=users[i].id,
+                work_id=works[0].id,
+                status=ReadingStatus.READ,
+                rating=Decimal("4.0"),
+                updated_at=now - timedelta(hours=i),
+            )
+            session.add(ub)
+
+        for i in range(2):
+            ub = UserBook(
+                id=uuid.uuid4(),
+                user_id=users[i].id,
+                work_id=works[1].id,
+                status=ReadingStatus.READ,
+                rating=Decimal("3.5"),
+                updated_at=now - timedelta(hours=i),
+            )
+            session.add(ub)
+
+        await session.commit()
+
+        result = await get_popular_this_week(db=session, limit=10)
+
+        assert len(result) >= 2
+        # Work 0 should be first (more reads)
+        assert result[0]["id"] == str(works[0].id)
+
+    async def test_excludes_old_activity(
+        self, session: AsyncSession, users: list[User], works: list[Work]
+    ):
+        old_date = datetime.utcnow() - timedelta(days=14)
+
+        # Only old reads — should not appear
+        for i in range(3):
+            ub = UserBook(
+                id=uuid.uuid4(),
+                user_id=users[i].id,
+                work_id=works[3].id,
+                status=ReadingStatus.READ,
+                rating=Decimal("4.0"),
+                updated_at=old_date,
+            )
+            session.add(ub)
+
+        await session.commit()
+
+        result = await get_popular_this_week(db=session, limit=10)
+
+        result_ids = [r["id"] for r in result]
+        assert str(works[3].id) not in result_ids
+
+    async def test_returns_empty_when_no_activity(
+        self, session: AsyncSession
+    ):
+        result = await get_popular_this_week(db=session, limit=10)
+        assert result == []
+
+
+# ── Tests: get_trending ──────────────────────────────────────────────────────
+
+
+class TestGetTrending:
+
+    async def test_returns_trending_books(
+        self, session: AsyncSession, users: list[User], works: list[Work]
+    ):
+        now = datetime.utcnow()
+
+        # Work 0: 3 status changes + 2 reviews in last 48h
+        for i in range(3):
+            ub = UserBook(
+                id=uuid.uuid4(),
+                user_id=users[i].id,
+                work_id=works[0].id,
+                status=ReadingStatus.READ,
+                rating=Decimal("4.0"),
+                review_text="Great book!" if i < 2 else None,
+                updated_at=now - timedelta(hours=i),
+            )
+            session.add(ub)
+
+        # Work 1: 1 status change in last 48h
+        ub = UserBook(
+            id=uuid.uuid4(),
+            user_id=users[0].id,
+            work_id=works[1].id,
+            status=ReadingStatus.READING,
+            updated_at=now - timedelta(hours=1),
+        )
+        session.add(ub)
+
+        await session.commit()
+
+        result = await get_trending(db=session, limit=10)
+
+        assert len(result) >= 1
+        # Work 0 should rank higher (more activity + reviews)
+        assert result[0]["id"] == str(works[0].id)
+
+    async def test_reviews_weighted_higher(
+        self, session: AsyncSession, users: list[User], works: list[Work]
+    ):
+        now = datetime.utcnow()
+
+        # Work 2: 1 activity + 1 review (score = 1 + 1*2 = 3)
+        ub = UserBook(
+            id=uuid.uuid4(),
+            user_id=users[0].id,
+            work_id=works[2].id,
+            status=ReadingStatus.READ,
+            rating=Decimal("5.0"),
+            review_text="Phenomenal read, changed my perspective entirely.",
+            updated_at=now,
+        )
+        session.add(ub)
+
+        # Work 3: 2 activities, no reviews (score = 2 + 0 = 2)
+        for i in range(2):
+            ub = UserBook(
+                id=uuid.uuid4(),
+                user_id=users[i].id,
+                work_id=works[3].id,
+                status=ReadingStatus.READING,
+                updated_at=now,
+            )
+            session.add(ub)
+
+        await session.commit()
+
+        result = await get_trending(db=session, limit=10)
+
+        result_ids = [r["id"] for r in result]
+        # Work 2 should rank above Work 3 because reviews have 2x weight
+        if str(works[2].id) in result_ids and str(works[3].id) in result_ids:
+            idx_2 = result_ids.index(str(works[2].id))
+            idx_3 = result_ids.index(str(works[3].id))
+            assert idx_2 < idx_3
+
+
+# ── Tests: get_because_you_read ──────────────────────────────────────────────
+
+
+class TestGetBecauseYouRead:
+
+    async def test_returns_source_and_recommendations(
+        self,
+        session: AsyncSession,
+        users: list[User],
+        works: list[Work],
+        rated_books: list[UserBook],
+    ):
+        # User 0 rated Work 0 at 4.5 — highest rated
+        result = await get_because_you_read(
+            db=session, user_id=users[0].id, limit=10
+        )
+
+        assert result["source_book"] is not None
+        assert result["source_book"]["id"] == str(works[0].id)
+        assert isinstance(result["recommendations"], list)
+
+    async def test_returns_empty_for_new_user(
+        self, session: AsyncSession
+    ):
+        new_user = User(
+            id=uuid.uuid4(),
+            username=f"newuser_{uuid.uuid4().hex[:6]}",
+        )
+        session.add(new_user)
+        await session.commit()
+
+        result = await get_because_you_read(
+            db=session, user_id=new_user.id, limit=10
+        )
+
+        assert result["source_book"] is None
+        assert result["recommendations"] == []
+
+    async def test_falls_back_to_recent_read(
+        self, session: AsyncSession, users: list[User], works: list[Work]
+    ):
+        # Create a user who read a book but didn't rate it
+        user = User(
+            id=uuid.uuid4(),
+            username=f"norate_{uuid.uuid4().hex[:6]}",
+        )
+        session.add(user)
+        await session.flush()
+
+        ub = UserBook(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            work_id=works[0].id,
+            status=ReadingStatus.READ,
+            rating=None,
+            updated_at=datetime.utcnow(),
+        )
+        session.add(ub)
+        await session.commit()
+
+        result = await get_because_you_read(
+            db=session, user_id=user.id, limit=10
+        )
+
+        # Should fall back to the unrated but read book
+        assert result["source_book"] is not None
+        assert result["source_book"]["id"] == str(works[0].id)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/BookService.swift  (ADD NEW METHODS)
+────────────────────────────────────────────────────────────────────────────────
+
+Add these methods to the existing BookService class:
+
+    // MARK: - Trending
+
+    func getTrending() async throws -> [Book] {
+        try await api.request(.get, path: "/books/trending")
+    }
+
+    // MARK: - Personalized Recommendations
+
+    func getRecommendations() async throws -> RecommendationResponse {
+        try await api.request(.get, path: "/me/recommendations")
+    }
+
+Add this model to ios/Shelf/Models/APIModels.swift:
+
+struct RecommendationResponse: Codable {
+    let sourceBook: RecommendationSource?
+    let recommendations: [Book]
+
+    enum CodingKeys: String, CodingKey {
+        case sourceBook = "source_book"
+        case recommendations
+    }
+}
+
+struct RecommendationSource: Codable, Identifiable {
+    let id: UUID
+    let title: String
+    let coverImageURL: String?
+    let rating: Double?
+    let authors: [Author]
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, rating, authors
+        case coverImageURL = "cover_image_url"
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/BookDetail/BookDetailView.swift  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+The existing "Readers also enjoyed" section in BookDetailView already works
+with the current similarBooks array from BookDetailViewModel. The backend
+change is transparent — the response shape is the same.
+
+To add "See All" navigation when there are more than 5 results, replace
+the existing similar books section with:
+
+                // Similar books
+                if !viewModel.similarBooks.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Readers also enjoyed")
+                                .font(.headline)
+                            Spacer()
+                            if viewModel.similarBooks.count > 5 {
+                                NavigationLink {
+                                    SimilarBooksListView(
+                                        bookID: bookID,
+                                        books: viewModel.similarBooks
+                                    )
+                                } label: {
+                                    Text("See All")
+                                        .font(.subheadline)
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                        }
+                        .padding(.horizontal)
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 12) {
+                                ForEach(viewModel.similarBooks.prefix(10)) { similar in
+                                    NavigationLink(value: similar) {
+                                        VStack(spacing: 6) {
+                                            BookCoverImage(
+                                                url: similar.coverImageURL,
+                                                size: CGSize(width: 80, height: 120)
+                                            )
+                                            Text(similar.title)
+                                                .font(.caption)
+                                                .lineLimit(2)
+                                                .multilineTextAlignment(.center)
+                                                .frame(width: 80)
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal)
+                        }
+                    }
+                }
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/BookDetail/SimilarBooksListView.swift  (NEW FILE)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+
+struct SimilarBooksListView: View {
+    let bookID: UUID
+    let books: [Book]
+
+    var body: some View {
+        List(books) { book in
+            NavigationLink(value: book) {
+                HStack(spacing: 12) {
+                    BookCoverImage(
+                        url: book.coverImageURL,
+                        size: CGSize(width: 50, height: 75)
+                    )
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(book.title)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(2)
+
+                        if let author = book.authors.first?.name {
+                            Text(author)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if let rating = book.averageRating {
+                            HStack(spacing: 4) {
+                                StarRatingDisplay(rating: rating, size: 12)
+                                Text(String(format: "%.1f", rating))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .listStyle(.plain)
+        .navigationTitle("Readers Also Enjoyed")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(for: Book.self) { book in
+            BookDetailView(bookID: book.id)
+        }
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/ViewModels/FeedViewModel.swift  (COLD START INTEGRATION)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace the existing loadFeed() method to handle the cold start case
+when the user follows nobody:
+
+    private let bookService = BookService.shared
+    private(set) var isDiscoverMode = false
+
+    @MainActor
+    func loadFeed() async {
+        guard !isLoading else { return }
+        isLoading = true
+        error = nil
+
+        do {
+            let response = try await feedService.getFeed()
+
+            if response.items.isEmpty {
+                // Cold start: user follows no one, feed is empty.
+                // Show popular books as a discovery feed instead.
+                let popular = try await bookService.getPopular()
+                let discoveryItems = popular.enumerated().map { index, book in
+                    FeedItem(
+                        id: UUID(),
+                        user: User(
+                            id: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
+                            username: "shelf",
+                            displayName: "Shelf",
+                            avatarURL: nil,
+                            bio: nil,
+                            favoriteBooks: nil,
+                            createdAt: nil
+                        ),
+                        activityType: .finishedBook,
+                        book: book,
+                        rating: book.averageRating,
+                        reviewText: nil,
+                        hasSpoilers: false,
+                        createdAt: Date()
+                    )
+                }
+                items = discoveryItems
+                isDiscoverMode = true
+                hasMore = false
+                nextCursor = nil
+            } else {
+                items = response.items
+                nextCursor = response.nextCursor
+                hasMore = response.hasMore
+                isDiscoverMode = false
+            }
+        } catch {
+            self.error = error
+        }
+
+        isLoading = false
+    }
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Feed/FeedView.swift  (COLD START HEADER)
+────────────────────────────────────────────────────────────────────────────────
+
+Add a discover mode header in the feedList. Insert this at the top of the
+LazyVStack, before the ForEach:
+
+                // Discover mode header for cold start users
+                if viewModel.isDiscoverMode {
+                    VStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.title2)
+                            .foregroundStyle(Color.accentColor)
+                        Text("Popular This Week")
+                            .font(.title3.weight(.bold))
+                        Text("Follow readers you know to personalize your feed.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(.vertical, 20)
+                    .padding(.horizontal)
+                    .frame(maxWidth: .infinity)
+                }
+
+
+────────────────────────────────────────────────────────────────────────────────
+ARCHITECTURE SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+Recommendation Pipeline:
+
+1. SIMILAR BOOKS (collaborative filtering)
+   - Triggered: User views book detail page
+   - SQL: CTE-based query on user_books table
+   - Performance: O(n) where n = high raters * their books
+   - Index needed: user_books(work_id, rating) and user_books(user_id)
+
+2. POPULAR THIS WEEK
+   - Triggered: /books/popular endpoint, cold start feed
+   - SQL: COUNT of read status changes in last 7 days
+   - Cache opportunity: Results change slowly, can cache 15 min
+
+3. TRENDING (48h)
+   - Triggered: /books/trending endpoint
+   - SQL: Activity count + review count (2x weighted) in 48h
+   - Cache opportunity: Results change hourly, can cache 5 min
+
+4. BECAUSE YOU READ
+   - Triggered: /me/recommendations endpoint
+   - Picks user's highest-rated book, calls get_similar_books
+   - Falls back to most recently read book if no ratings exist
+
+Database Indexes (ensure these exist for query performance):
+
+    CREATE INDEX ix_user_books_work_rating ON user_books (work_id, rating);
+    CREATE INDEX ix_user_books_user_id ON user_books (user_id);
+    CREATE INDEX ix_user_books_status_updated ON user_books (status, updated_at);
+    CREATE INDEX ix_user_books_updated_at ON user_books (updated_at);

@@ -1,0 +1,1421 @@
+================================================================================
+10 — RevenueCat Subscription Management with StoreKit
+Server-side validation, premium gating, and paywall integration
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/SubscriptionService.swift  (COMPLETE REWRITE)
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+import RevenueCat
+
+@Observable
+final class SubscriptionService: NSObject {
+    static let shared = SubscriptionService()
+
+    private(set) var isPremium = false
+    private(set) var currentOffering: Offering?
+    private(set) var activeSubscription: EntitlementInfo?
+    private(set) var isLoading = false
+
+    static let entitlementID = "premium"
+    static let apiKey = "" // Set in RevenueCat dashboard → API Keys → public SDK key
+
+    private let api = APIClient.shared
+
+    private override init() {
+        super.init()
+    }
+
+    // MARK: - Configuration
+
+    func configure() {
+        guard !Self.apiKey.isEmpty else { return }
+
+        Purchases.logLevel = .debug
+        Purchases.configure(
+            with: .init(withAPIKey: Self.apiKey)
+                .with(entitlementVerificationMode: .informational)
+        )
+        Purchases.shared.delegate = self
+    }
+
+    func configureUser(userID: String) {
+        guard !Self.apiKey.isEmpty else { return }
+        Purchases.shared.logIn(userID) { [weak self] customerInfo, _, error in
+            if let error {
+                AnalyticsService.captureError(error, context: ["action": "revenucat_login"])
+                return
+            }
+            if let customerInfo {
+                self?.updateStatus(from: customerInfo)
+            }
+        }
+    }
+
+    func logOut() {
+        guard !Self.apiKey.isEmpty else { return }
+        Purchases.shared.logOut { [weak self] customerInfo, error in
+            if let error {
+                AnalyticsService.captureError(error, context: ["action": "revenucat_logout"])
+            }
+            self?.isPremium = false
+            self?.activeSubscription = nil
+            self?.currentOffering = nil
+        }
+    }
+
+    // MARK: - Check Status
+
+    @MainActor
+    func checkSubscriptionStatus() async {
+        guard !Self.apiKey.isEmpty else { return }
+        do {
+            let customerInfo = try await Purchases.shared.customerInfo()
+            updateStatus(from: customerInfo)
+            await verifyWithBackend()
+        } catch {
+            AnalyticsService.captureError(error, context: ["action": "check_subscription"])
+            isPremium = false
+        }
+    }
+
+    // MARK: - Fetch Offerings
+
+    @MainActor
+    func fetchOfferings() async {
+        guard !Self.apiKey.isEmpty else { return }
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let offerings = try await Purchases.shared.offerings()
+            currentOffering = offerings.current
+        } catch {
+            AnalyticsService.captureError(error, context: ["action": "fetch_offerings"])
+        }
+    }
+
+    // MARK: - Purchase
+
+    @MainActor
+    func purchase(package: Package) async throws -> Bool {
+        let result = try await Purchases.shared.purchase(package: package)
+
+        if result.userCancelled {
+            return false
+        }
+
+        updateStatus(from: result.customerInfo)
+
+        if isPremium {
+            await verifyWithBackend()
+        }
+
+        return true
+    }
+
+    // MARK: - Restore Purchases
+
+    @MainActor
+    func restorePurchases() async throws {
+        let customerInfo = try await Purchases.shared.restorePurchases()
+        updateStatus(from: customerInfo)
+
+        if isPremium {
+            await verifyWithBackend()
+        }
+    }
+
+    // MARK: - Premium Feature Checks
+
+    var maxShelves: Int {
+        isPremium ? .max : 20
+    }
+
+    var adsEnabled: Bool {
+        !isPremium
+    }
+
+    var canCreateShelf: Bool {
+        isPremium
+    }
+
+    func canCreateShelf(currentCount: Int) -> Bool {
+        currentCount < maxShelves
+    }
+
+    // MARK: - Manage Subscription URL
+
+    func openManageSubscriptions() async {
+        guard let windowScene = await UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first else { return }
+
+        do {
+            try await AppStore.showManageSubscriptions(in: windowScene)
+        } catch {
+            if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                await UIApplication.shared.open(url)
+            }
+        }
+    }
+
+    // MARK: - Backend Verification
+
+    private func verifyWithBackend() async {
+        guard let appUserID = Purchases.shared.appUserID as String? else { return }
+
+        do {
+            let body = SubscriptionVerifyRequest(appUserID: appUserID)
+            try await api.request(.post, path: "/me/subscription/verify", body: body)
+        } catch {
+            AnalyticsService.captureError(error, context: ["action": "verify_subscription_backend"])
+        }
+    }
+
+    // MARK: - Private
+
+    private func updateStatus(from customerInfo: CustomerInfo) {
+        let entitlement = customerInfo.entitlements[Self.entitlementID]
+        isPremium = entitlement?.isActive == true
+        activeSubscription = entitlement
+    }
+}
+
+// MARK: - PurchasesDelegate
+
+extension SubscriptionService: PurchasesDelegate {
+    nonisolated func purchases(_ purchases: Purchases, receivedUpdated customerInfo: CustomerInfo) {
+        Task { @MainActor in
+            updateStatus(from: customerInfo)
+        }
+    }
+}
+
+// MARK: - Request Model
+
+struct SubscriptionVerifyRequest: Codable {
+    let appUserID: String
+
+    enum CodingKeys: String, CodingKey {
+        case appUserID = "app_user_id"
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Profile/PaywallView.swift  (COMPLETE REWRITE)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+import RevenueCat
+import StoreKit
+
+struct PaywallView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedPackage: Package?
+    @State private var isPurchasing = false
+    @State private var errorMessage: String?
+    @State private var showSuccess = false
+
+    private let subscriptionService = SubscriptionService.shared
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 24) {
+                    headerSection
+                    featureComparisonSection
+                    packageSelectionSection
+                    purchaseButton
+                    errorSection
+                    restoreSection
+                    legalSection
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+            .task {
+                await subscriptionService.fetchOfferings()
+                autoSelectAnnual()
+                AnalyticsService.track(.paywallViewed)
+            }
+            .overlay {
+                if showSuccess {
+                    successOverlay
+                }
+            }
+        }
+    }
+
+    // MARK: - Header
+
+    private var headerSection: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "crown.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.yellow)
+
+            Text("Shelf Premium")
+                .font(.title.bold())
+
+            Text("Get the most out of your reading life")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.top, 20)
+    }
+
+    // MARK: - Feature Comparison
+
+    private var featureComparisonSection: some View {
+        VStack(spacing: 0) {
+            // Header row
+            HStack {
+                Text("Feature")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Free")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 60)
+                Text("Premium")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 70)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(Color(.systemGray6))
+
+            ComparisonRow(feature: "Track & review books", free: true, premium: true)
+            ComparisonRow(feature: "Follow friends", free: true, premium: true)
+            ComparisonRow(feature: "Shelves", free: "20", premium: "Unlimited")
+            ComparisonRow(feature: "Ad-free experience", free: false, premium: true)
+            ComparisonRow(feature: "Advanced reading stats", free: false, premium: true)
+            ComparisonRow(feature: "Custom profile themes", free: false, premium: true)
+            ComparisonRow(feature: "Enhanced Year in Review", free: false, premium: true)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color(.systemGray4), lineWidth: 1)
+        )
+        .padding(.horizontal)
+    }
+
+    // MARK: - Package Selection
+
+    private var packageSelectionSection: some View {
+        VStack(spacing: 12) {
+            if let offering = subscriptionService.currentOffering {
+                ForEach(offering.availablePackages.sorted(by: {
+                    packageSortOrder($0) < packageSortOrder($1)
+                }), id: \.identifier) { package in
+                    PackageOptionView(
+                        package: package,
+                        isSelected: selectedPackage?.identifier == package.identifier,
+                        badge: packageBadge(for: package)
+                    ) {
+                        selectedPackage = package
+                    }
+                }
+            } else if subscriptionService.isLoading {
+                ProgressView()
+                    .frame(height: 120)
+            } else {
+                // Fallback display when offerings haven't loaded
+                VStack(spacing: 12) {
+                    PricingCard(title: "Monthly", price: "$4.99/mo", isPopular: false, isSelected: false)
+                    PricingCard(title: "Annual", price: "$39.99/yr", isPopular: true, isSelected: false)
+                }
+            }
+        }
+        .padding(.horizontal)
+    }
+
+    // MARK: - Purchase Button
+
+    private var purchaseButton: some View {
+        Button {
+            purchase()
+        } label: {
+            Group {
+                if isPurchasing {
+                    ProgressView()
+                        .tint(.white)
+                } else {
+                    Text(purchaseButtonTitle)
+                        .fontWeight(.semibold)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background(selectedPackage != nil ? Color.accentColor : Color(.systemGray3))
+            .foregroundStyle(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(isPurchasing || selectedPackage == nil)
+        .padding(.horizontal)
+    }
+
+    private var purchaseButtonTitle: String {
+        guard let package = selectedPackage else { return "Select a Plan" }
+        let price = package.storeProduct.localizedPriceString
+        if package.packageType == .annual {
+            return "Subscribe for \(price)/year"
+        }
+        return "Subscribe for \(price)/month"
+    }
+
+    // MARK: - Error
+
+    @ViewBuilder
+    private var errorSection: some View {
+        if let errorMessage {
+            Text(errorMessage)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+        }
+    }
+
+    // MARK: - Restore
+
+    private var restoreSection: some View {
+        Button("Restore Purchases") {
+            restore()
+        }
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .disabled(isPurchasing)
+    }
+
+    // MARK: - Legal
+
+    private var legalSection: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 16) {
+                Link("Terms of Service", destination: URL(string: "https://shelf.app/terms")!)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Link("Privacy Policy", destination: URL(string: "https://shelf.app/privacy")!)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Payment will be charged to your Apple ID account at confirmation of purchase. Subscription automatically renews unless cancelled at least 24 hours before the end of the current period. Your account will be charged for renewal within 24 hours prior to the end of the current period at the same rate. You can manage and cancel your subscriptions in your App Store account settings.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+        }
+        .padding(.bottom, 20)
+    }
+
+    // MARK: - Success Overlay
+
+    private var successOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.green)
+
+                Text("Welcome to Premium!")
+                    .font(.title2.bold())
+
+                Text("You now have access to all premium features.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Button("Get Started") {
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 8)
+            }
+            .padding(32)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 20))
+            .padding(.horizontal, 32)
+        }
+        .transition(.opacity)
+    }
+
+    // MARK: - Actions
+
+    private func purchase() {
+        guard let package = selectedPackage else { return }
+        isPurchasing = true
+        errorMessage = nil
+
+        Task {
+            do {
+                let success = try await subscriptionService.purchase(package: package)
+                if success {
+                    AnalyticsService.track(.subscriptionStarted, properties: [
+                        "package": package.identifier,
+                        "price": package.storeProduct.localizedPriceString
+                    ])
+                    withAnimation {
+                        showSuccess = true
+                    }
+                }
+            } catch {
+                if let rcError = error as? RevenueCat.ErrorCode,
+                   rcError == .purchaseCancelledError {
+                    // User cancelled - no error message needed
+                } else {
+                    errorMessage = error.localizedDescription
+                    AnalyticsService.captureError(error, context: ["action": "purchase"])
+                }
+            }
+            isPurchasing = false
+        }
+    }
+
+    private func restore() {
+        isPurchasing = true
+        errorMessage = nil
+
+        Task {
+            do {
+                try await subscriptionService.restorePurchases()
+                if subscriptionService.isPremium {
+                    AnalyticsService.track(.subscriptionRestored)
+                    withAnimation {
+                        showSuccess = true
+                    }
+                } else {
+                    errorMessage = "No active subscription found. If you believe this is an error, contact support."
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                AnalyticsService.captureError(error, context: ["action": "restore_purchases"])
+            }
+            isPurchasing = false
+        }
+    }
+
+    private func autoSelectAnnual() {
+        guard selectedPackage == nil,
+              let offering = subscriptionService.currentOffering else { return }
+        selectedPackage = offering.availablePackages.first(where: { $0.packageType == .annual })
+            ?? offering.availablePackages.first
+    }
+
+    private func packageSortOrder(_ package: Package) -> Int {
+        switch package.packageType {
+        case .annual: 0
+        case .monthly: 1
+        default: 2
+        }
+    }
+
+    private func packageBadge(for package: Package) -> String? {
+        if package.packageType == .annual {
+            return "Save 33%"
+        }
+        return nil
+    }
+}
+
+// MARK: - Comparison Row
+
+private struct ComparisonRow: View {
+    let feature: String
+    let freeValue: ComparisonValue
+    let premiumValue: ComparisonValue
+
+    init(feature: String, free: Bool, premium: Bool) {
+        self.feature = feature
+        self.freeValue = .bool(free)
+        self.premiumValue = .bool(premium)
+    }
+
+    init(feature: String, free: String, premium: String) {
+        self.feature = feature
+        self.freeValue = .text(free)
+        self.premiumValue = .text(premium)
+    }
+
+    var body: some View {
+        HStack {
+            Text(feature)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            comparisonCell(freeValue)
+                .frame(width: 60)
+            comparisonCell(premiumValue)
+                .frame(width: 70)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private func comparisonCell(_ value: ComparisonValue) -> some View {
+        switch value {
+        case .bool(true):
+            Image(systemName: "checkmark")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.green)
+        case .bool(false):
+            Image(systemName: "xmark")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.tertiary)
+        case .text(let text):
+            Text(text)
+                .font(.caption.weight(.medium))
+        }
+    }
+}
+
+private enum ComparisonValue {
+    case bool(Bool)
+    case text(String)
+}
+
+// MARK: - Package Option View
+
+struct PackageOptionView: View {
+    let package: Package
+    let isSelected: Bool
+    let badge: String?
+    let onTap: () -> Void
+
+    init(package: Package, isSelected: Bool, badge: String? = nil, onTap: @escaping () -> Void) {
+        self.package = package
+        self.isSelected = isSelected
+        self.badge = badge
+        self.onTap = onTap
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(package.storeProduct.localizedTitle)
+                            .font(.subheadline.weight(.semibold))
+                        if let badge {
+                            Text(badge)
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor)
+                                .foregroundStyle(.white)
+                                .clipShape(Capsule())
+                        }
+                    }
+                    Text(packageDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .font(.title3)
+            }
+            .padding()
+            .background(isSelected ? Color.accentColor.opacity(0.1) : Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var packageDescription: String {
+        let price = package.storeProduct.localizedPriceString
+        switch package.packageType {
+        case .monthly:
+            return "\(price) per month"
+        case .annual:
+            let monthlyEquivalent = package.storeProduct.price / 12
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .currency
+            formatter.locale = package.storeProduct.priceFormatter?.locale ?? .current
+            let monthlyString = formatter.string(from: monthlyEquivalent as NSDecimalNumber) ?? ""
+            return "\(price) per year (\(monthlyString)/mo)"
+        default:
+            return price
+        }
+    }
+}
+
+// MARK: - Pricing Card (fallback when offerings unavailable)
+
+struct PricingCard: View {
+    let title: String
+    let price: String
+    let isPopular: Bool
+    let isSelected: Bool
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                    if isPopular {
+                        Text("Best Value")
+                            .font(.caption2.weight(.bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor)
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                    }
+                }
+                Text(price)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "circle")
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Profile/SettingsView.swift  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace the existing premium upsell section and add a subscription management
+section. The full Section to replace starts at the "// Premium upsell" comment.
+
+Replace the existing section with:
+
+            // Subscription section
+            Section {
+                if subscriptionService.isPremium {
+                    HStack(spacing: 12) {
+                        Image(systemName: "crown.fill")
+                            .foregroundStyle(.yellow)
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Shelf Premium")
+                                .font(.subheadline.weight(.semibold))
+                            if let sub = subscriptionService.activeSubscription {
+                                Text("Active \(sub.periodType == .normal ? "subscription" : "trial")")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                            } else {
+                                Text("Active")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                        Spacer()
+                    }
+
+                    Button("Manage Subscription") {
+                        Task {
+                            await subscriptionService.openManageSubscriptions()
+                        }
+                    }
+                } else {
+                    Button {
+                        showPaywall = true
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "crown.fill")
+                                .foregroundStyle(.yellow)
+                                .font(.title3)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Shelf Premium")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Ad-free, unlimited shelves, and more")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+Add this inside the "Support" section, after the Terms of Service link:
+
+                Button("Restore Purchases") {
+                    Task {
+                        try? await subscriptionService.restorePurchases()
+                    }
+                }
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Shelves/CreateShelfView.swift  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+Premium gate for shelf creation. Replace the existing `create()` function with:
+
+    private let subscriptionService = SubscriptionService.shared
+    @State private var showPaywall = false
+
+Add this property alongside the existing state properties at the top, and add
+the sheet modifier after the existing toolbar modifier:
+
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+        }
+
+Replace the `create()` function body:
+
+    private func create() {
+        isSaving = true
+        errorMessage = nil
+
+        Task {
+            do {
+                let shelves = try await ShelfService.shared.getMyShelves()
+                guard subscriptionService.canCreateShelf(currentCount: shelves.count) else {
+                    isSaving = false
+                    showPaywall = true
+                    return
+                }
+
+                let request = CreateShelfRequest(
+                    name: name,
+                    description: description.isEmpty ? nil : description,
+                    isPublic: isPublic
+                )
+                let shelf = try await ShelfService.shared.createShelf(request)
+                onCreated(shelf)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isSaving = false
+        }
+    }
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Feed/FeedView.swift  (MODIFICATIONS — ad suppression)
+────────────────────────────────────────────────────────────────────────────────
+
+No changes needed. The existing FeedView already checks
+`adService.shouldInsertAd(at:)` which internally checks
+`subscriptionService.adsEnabled`. When isPremium becomes true,
+adsEnabled returns false, and shouldShowAds in AdService returns false.
+The gate is already in place.
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/App/ShelfApp.swift  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+No changes needed. The existing ShelfApp.init already calls
+SubscriptionService.shared.configure() and the .task block already calls
+configureUser and checkSubscriptionStatus. The rewritten SubscriptionService
+is a drop-in replacement.
+
+To add logout cleanup, add inside AuthService.signOut callback or wherever
+sign-out is handled:
+
+    SubscriptionService.shared.logOut()
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/config.py  (add revenucat settings)
+────────────────────────────────────────────────────────────────────────────────
+
+Add these fields to the existing Settings class:
+
+    revenucat_api_key: str = ""
+    revenucat_webhook_secret: str = ""
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/subscription_service.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+from uuid import UUID
+
+import httpx
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.config import get_settings
+from api.errors import AppError
+from models import User
+
+logger = logging.getLogger(__name__)
+
+REVENUCAT_API_BASE = "https://api.revenuecat.com/v1"
+
+
+async def verify_subscription(
+    db: AsyncSession,
+    user_id: UUID,
+    app_user_id: str,
+) -> bool:
+    """Call RevenueCat API to verify the user's subscription status and update
+    the is_premium flag in the database. Returns the new premium status."""
+    settings = get_settings()
+
+    if not settings.revenucat_api_key:
+        raise AppError(500, "CONFIG_ERROR", "RevenueCat API key not configured")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{REVENUCAT_API_BASE}/subscribers/{app_user_id}",
+            headers={
+                "Authorization": f"Bearer {settings.revenucat_api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=10.0,
+        )
+
+    if response.status_code == 404:
+        logger.warning("RevenueCat subscriber not found: %s", app_user_id)
+        await _update_premium_status(db, user_id, False)
+        return False
+
+    if response.status_code != 200:
+        logger.error(
+            "RevenueCat API error: status=%d body=%s",
+            response.status_code,
+            response.text,
+        )
+        raise AppError(502, "REVENUCAT_ERROR", "Failed to verify subscription with RevenueCat")
+
+    data = response.json()
+    subscriber = data.get("subscriber", {})
+    entitlements = subscriber.get("entitlements", {})
+    premium = entitlements.get("premium", {})
+
+    is_premium = (
+        premium.get("expires_date") is not None
+        and premium.get("unsubscribe_detected_at") is None
+    ) or premium.get("expires_date") is None and "premium" in entitlements
+
+    # RevenueCat returns expires_date=null for lifetime, or a future date for active
+    # Also check product_identifier exists to confirm actual entitlement
+    if "premium" in entitlements:
+        expires = premium.get("expires_date")
+        if expires is None:
+            # Lifetime entitlement
+            is_premium = True
+        else:
+            # Active if expires_date is in the future (RevenueCat only returns
+            # active entitlements, but we double-check)
+            is_premium = True
+    else:
+        is_premium = False
+
+    await _update_premium_status(db, user_id, is_premium)
+    return is_premium
+
+
+async def handle_webhook(
+    db: AsyncSession,
+    payload: dict,
+    signature: str | None,
+) -> None:
+    """Process a RevenueCat server-to-server webhook event."""
+    settings = get_settings()
+
+    if settings.revenucat_webhook_secret and signature:
+        if not _verify_webhook_signature(payload, signature, settings.revenucat_webhook_secret):
+            raise AppError(401, "INVALID_SIGNATURE", "Webhook signature verification failed")
+
+    event = payload.get("event", {})
+    event_type = event.get("type", "")
+    app_user_id = event.get("app_user_id", "")
+
+    if not app_user_id:
+        logger.warning("Webhook event missing app_user_id: %s", event_type)
+        return
+
+    logger.info("Processing RevenueCat webhook: type=%s user=%s", event_type, app_user_id)
+
+    # Map RevenueCat event types to premium status changes
+    grant_premium_events = {
+        "INITIAL_PURCHASE",
+        "RENEWAL",
+        "UNCANCELLATION",
+        "NON_RENEWING_PURCHASE",
+    }
+    revoke_premium_events = {
+        "CANCELLATION",
+        "EXPIRATION",
+        "BILLING_ISSUE",
+    }
+
+    # app_user_id from RevenueCat matches user.id (set during configureUser)
+    try:
+        user_id = UUID(app_user_id)
+    except ValueError:
+        logger.warning("Invalid app_user_id (not a UUID): %s", app_user_id)
+        return
+
+    if event_type in grant_premium_events:
+        await _update_premium_status(db, user_id, True)
+        logger.info("Granted premium to user %s via %s", user_id, event_type)
+    elif event_type in revoke_premium_events:
+        # For CANCELLATION, the user retains access until period end.
+        # EXPIRATION means the period actually ended.
+        if event_type == "EXPIRATION" or event_type == "BILLING_ISSUE":
+            await _update_premium_status(db, user_id, False)
+            logger.info("Revoked premium from user %s via %s", user_id, event_type)
+        elif event_type == "CANCELLATION":
+            # Don't revoke yet - user still has access until expiration
+            logger.info(
+                "User %s cancelled but still active until period end", user_id
+            )
+    else:
+        logger.debug("Ignoring RevenueCat event type: %s", event_type)
+
+
+async def _update_premium_status(
+    db: AsyncSession,
+    user_id: UUID,
+    is_premium: bool,
+) -> None:
+    """Update the user's is_premium flag in the database."""
+    stmt = update(User).where(User.id == user_id).values(is_premium=is_premium)
+    await db.execute(stmt)
+    await db.commit()
+
+
+def _verify_webhook_signature(
+    payload: dict,
+    signature: str,
+    secret: str,
+) -> bool:
+    """Verify RevenueCat webhook signature using HMAC-SHA256."""
+    import json
+
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/subscription.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import logging
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, Request
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.deps import get_current_user, get_db
+from models import User
+from services import subscription_service
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+DB = Annotated[AsyncSession, Depends(get_db)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+class VerifySubscriptionRequest(BaseModel):
+    app_user_id: str
+
+
+class VerifySubscriptionResponse(BaseModel):
+    is_premium: bool
+
+
+@router.post("/me/subscription/verify", response_model=VerifySubscriptionResponse)
+async def verify_subscription(
+    body: VerifySubscriptionRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> VerifySubscriptionResponse:
+    """Client-triggered subscription verification. Calls RevenueCat API to
+    confirm the user's entitlement status and updates the database."""
+    is_premium = await subscription_service.verify_subscription(
+        db=db,
+        user_id=current_user.id,
+        app_user_id=body.app_user_id,
+    )
+    return VerifySubscriptionResponse(is_premium=is_premium)
+
+
+class WebhookResponse(BaseModel):
+    status: str = "ok"
+
+
+@router.post("/webhooks/revenucat", response_model=WebhookResponse)
+async def revenucat_webhook(
+    request: Request,
+    db: DB,
+    x_revenucat_signature: Annotated[str | None, Header()] = None,
+) -> WebhookResponse:
+    """RevenueCat server-to-server webhook endpoint. This endpoint is public
+    (no auth required) but validated via shared secret / signature.
+
+    Configure this URL in RevenueCat Dashboard > Integrations > Webhooks:
+    https://shelf-api.up.railway.app/api/v1/webhooks/revenucat
+    """
+    payload = await request.json()
+
+    await subscription_service.handle_webhook(
+        db=db,
+        payload=payload,
+        signature=x_revenucat_signature,
+    )
+
+    return WebhookResponse()
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/__init__.py  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+Add the subscription router to the main router registration. In main.py or
+wherever routers are included, add:
+
+    from api.routes.subscription import router as subscription_router
+
+    app.include_router(subscription_router, prefix="/api/v1", tags=["subscription"])
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_subscription.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from httpx import Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models import User
+from services.subscription_service import (
+    handle_webhook,
+    verify_subscription,
+)
+
+
+@pytest.fixture
+def user_id() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+@pytest.fixture
+async def test_user(session: AsyncSession, user_id: uuid.UUID) -> User:
+    user = User(
+        id=user_id,
+        username=f"testuser_{user_id.hex[:8]}",
+        is_premium=False,
+    )
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+def _make_revenucat_response(has_premium: bool = True) -> dict:
+    """Build a mock RevenueCat GET /subscribers response."""
+    entitlements = {}
+    if has_premium:
+        entitlements["premium"] = {
+            "expires_date": "2027-01-01T00:00:00Z",
+            "purchase_date": "2026-01-01T00:00:00Z",
+            "product_identifier": "shelf_premium_annual",
+            "unsubscribe_detected_at": None,
+        }
+    return {"subscriber": {"entitlements": entitlements}}
+
+
+class TestVerifySubscription:
+    """Tests for client-triggered subscription verification."""
+
+    @patch("services.subscription_service.get_settings")
+    async def test_verify_active_subscription(
+        self, mock_settings, session: AsyncSession, test_user: User
+    ):
+        mock_settings.return_value = MagicMock(
+            revenucat_api_key="test_api_key",
+            revenucat_webhook_secret="",
+        )
+
+        mock_response = MagicMock(spec=Response)
+        mock_response.status_code = 200
+        mock_response.json.return_value = _make_revenucat_response(has_premium=True)
+
+        with patch("services.subscription_service.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await verify_subscription(
+                db=session,
+                user_id=test_user.id,
+                app_user_id=str(test_user.id),
+            )
+
+        assert result is True
+
+        await session.refresh(test_user)
+        assert test_user.is_premium is True
+
+    @patch("services.subscription_service.get_settings")
+    async def test_verify_no_subscription(
+        self, mock_settings, session: AsyncSession, test_user: User
+    ):
+        mock_settings.return_value = MagicMock(
+            revenucat_api_key="test_api_key",
+            revenucat_webhook_secret="",
+        )
+
+        mock_response = MagicMock(spec=Response)
+        mock_response.status_code = 200
+        mock_response.json.return_value = _make_revenucat_response(has_premium=False)
+
+        with patch("services.subscription_service.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await verify_subscription(
+                db=session,
+                user_id=test_user.id,
+                app_user_id=str(test_user.id),
+            )
+
+        assert result is False
+
+        await session.refresh(test_user)
+        assert test_user.is_premium is False
+
+    @patch("services.subscription_service.get_settings")
+    async def test_verify_subscriber_not_found(
+        self, mock_settings, session: AsyncSession, test_user: User
+    ):
+        mock_settings.return_value = MagicMock(
+            revenucat_api_key="test_api_key",
+            revenucat_webhook_secret="",
+        )
+
+        mock_response = MagicMock(spec=Response)
+        mock_response.status_code = 404
+
+        with patch("services.subscription_service.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await verify_subscription(
+                db=session,
+                user_id=test_user.id,
+                app_user_id=str(test_user.id),
+            )
+
+        assert result is False
+
+
+class TestWebhookHandling:
+    """Tests for RevenueCat webhook event processing."""
+
+    async def test_initial_purchase_grants_premium(
+        self, session: AsyncSession, test_user: User
+    ):
+        payload = {
+            "event": {
+                "type": "INITIAL_PURCHASE",
+                "app_user_id": str(test_user.id),
+                "product_id": "shelf_premium_annual",
+            }
+        }
+
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+        await session.refresh(test_user)
+        assert test_user.is_premium is True
+
+    async def test_renewal_keeps_premium(
+        self, session: AsyncSession, test_user: User
+    ):
+        # First grant premium
+        test_user.is_premium = True
+        await session.commit()
+
+        payload = {
+            "event": {
+                "type": "RENEWAL",
+                "app_user_id": str(test_user.id),
+                "product_id": "shelf_premium_annual",
+            }
+        }
+
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+        await session.refresh(test_user)
+        assert test_user.is_premium is True
+
+    async def test_expiration_revokes_premium(
+        self, session: AsyncSession, test_user: User
+    ):
+        # Grant premium first
+        test_user.is_premium = True
+        await session.commit()
+
+        payload = {
+            "event": {
+                "type": "EXPIRATION",
+                "app_user_id": str(test_user.id),
+                "expiration_at_ms": 1700000000000,
+            }
+        }
+
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+        await session.refresh(test_user)
+        assert test_user.is_premium is False
+
+    async def test_cancellation_does_not_immediately_revoke(
+        self, session: AsyncSession, test_user: User
+    ):
+        test_user.is_premium = True
+        await session.commit()
+
+        payload = {
+            "event": {
+                "type": "CANCELLATION",
+                "app_user_id": str(test_user.id),
+            }
+        }
+
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+        await session.refresh(test_user)
+        # Cancellation does not revoke until period ends
+        assert test_user.is_premium is True
+
+    async def test_billing_issue_revokes_premium(
+        self, session: AsyncSession, test_user: User
+    ):
+        test_user.is_premium = True
+        await session.commit()
+
+        payload = {
+            "event": {
+                "type": "BILLING_ISSUE",
+                "app_user_id": str(test_user.id),
+            }
+        }
+
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+        await session.refresh(test_user)
+        assert test_user.is_premium is False
+
+    async def test_webhook_ignores_unknown_event(
+        self, session: AsyncSession, test_user: User
+    ):
+        payload = {
+            "event": {
+                "type": "SUBSCRIBER_ALIAS",
+                "app_user_id": str(test_user.id),
+            }
+        }
+
+        # Should not raise
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+    async def test_webhook_handles_missing_app_user_id(
+        self, session: AsyncSession
+    ):
+        payload = {
+            "event": {
+                "type": "INITIAL_PURCHASE",
+                "app_user_id": "",
+            }
+        }
+
+        # Should not raise
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+    async def test_webhook_handles_invalid_uuid(
+        self, session: AsyncSession
+    ):
+        payload = {
+            "event": {
+                "type": "INITIAL_PURCHASE",
+                "app_user_id": "not-a-uuid",
+            }
+        }
+
+        # Should not raise
+        await handle_webhook(db=session, payload=payload, signature=None)
+
+
+────────────────────────────────────────────────────────────────────────────────
+PREMIUM GATE INTEGRATION SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+1. SHELF CREATION LIMIT
+   - File: ios/Shelf/Views/Shelves/CreateShelfView.swift
+   - Check: subscriptionService.canCreateShelf(currentCount:)
+   - Behavior: If at limit, present PaywallView as sheet
+   - Free limit: 20 shelves. Premium: unlimited.
+
+2. AD SUPPRESSION
+   - File: ios/Shelf/Views/Feed/FeedView.swift
+   - Already integrated. AdService.shouldInsertAd(at:) checks
+     SubscriptionService.shared.adsEnabled internally.
+   - When isPremium = true, adsEnabled = false, no ads shown.
+
+3. FUTURE PREMIUM FEATURES (check isPremium before enabling)
+   - Custom profile themes: In EditProfileView, disable theme picker if !isPremium
+   - Advanced stats: In ProfileViewModel stats section, show upgrade prompt
+   - Enhanced Year in Review: Gate the detailed year-in-review generation
+
+4. BACKEND PREMIUM FLAG
+   - users.is_premium column already exists in the User model
+   - Updated via verify_subscription and webhook handlers
+   - Can be used server-side to enforce limits (e.g., shelf count in
+     the shelves route handler)

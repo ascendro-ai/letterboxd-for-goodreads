@@ -80,6 +80,7 @@ struct BookDetailView: View {
                     Text(book.title)
                         .font(.title2.bold())
                         .multilineTextAlignment(.center)
+                        .accessibilityAddTraits(.isHeader)
 
                     if !book.authors.isEmpty {
                         Text(book.authors.map(\.name).joined(separator: ", "))
@@ -94,6 +95,17 @@ struct BookDetailView: View {
                     }
                 }
                 .padding(.horizontal)
+
+                // Series badge
+                if !viewModel.seriesList.isEmpty {
+                    VStack(spacing: 4) {
+                        ForEach(viewModel.seriesList) { series in
+                            if let work = series.works.first {
+                                SeriesBadge(series: series, position: work.position)
+                            }
+                        }
+                    }
+                }
 
                 // Rating summary
                 if let rating = book.averageRating {
@@ -123,12 +135,14 @@ struct BookDetailView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 .padding(.horizontal)
+                .accessibilityLabel(viewModel.userBook != nil ? "Edit your log for \(book.title)" : "Log \(book.title)")
 
                 // Description
                 if let description = book.description, !description.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("About")
                             .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
                         Text(description)
                             .font(.body)
                             .foregroundStyle(.secondary)
@@ -137,11 +151,15 @@ struct BookDetailView: View {
                     .padding(.horizontal)
                 }
 
+                // Content tags
+                ContentTagsSection(workID: book.id)
+
                 // Subjects
                 if !book.subjects.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Genres")
                             .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
                         FlowLayout(spacing: 6) {
                             ForEach(book.subjects.prefix(8), id: \.self) { subject in
                                 Text(subject)
@@ -175,6 +193,7 @@ struct BookDetailView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Reviews")
                             .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
                             .padding(.horizontal)
 
                         ForEach(viewModel.reviews) { review in
@@ -188,6 +207,7 @@ struct BookDetailView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Readers also enjoyed")
                             .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
                             .padding(.horizontal)
 
                         ScrollView(.horizontal, showsIndicators: false) {

@@ -53,12 +53,14 @@ struct ReportContentView: View {
                             }
                         }
                     }
+                    .accessibilityAddTraits(selectedReason == reason ? .isSelected : [])
                 }
             }
 
             Section("Additional details (optional)") {
                 TextEditor(text: $additionalInfo)
                     .frame(minHeight: 80)
+                    .accessibilityLabel("Additional details")
             }
         }
         .navigationTitle("Report")

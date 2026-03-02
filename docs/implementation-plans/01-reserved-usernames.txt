@@ -1,0 +1,662 @@
+================================================================================
+IMPLEMENTATION PLAN: Reserved Username Validation
+================================================================================
+
+Feature: A static blocklist of reserved usernames checked at signup and
+username change, plus format validation rules enforced on both backend and iOS.
+
+================================================================================
+FILE: backend/services/reserved_usernames.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import re
+
+RESERVED_USERNAMES: frozenset[str] = frozenset({
+    # Product / brand
+    "shelf", "shelfapp", "admin", "administrator", "moderator", "mod",
+    "support", "help", "official", "team", "staff", "system",
+
+    # Routes / URL conflicts
+    "api", "auth", "login", "signup", "register", "settings", "profile",
+    "feed", "search", "explore", "discover", "import", "export",
+    "notifications", "messages", "books", "shelves", "users", "me",
+
+    # Common reserved
+    "root", "null", "undefined", "anonymous", "deleted", "unknown",
+    "test", "demo", "example", "info", "contact", "about", "terms",
+    "privacy", "legal", "copyright", "blog", "news", "press",
+
+    # Social / impersonation prevention
+    "goodreads", "storygraph", "letterboxd", "amazon", "kindle",
+    "audible", "libby", "kobo", "apple", "google", "bookstagram",
+    "booktok",
+})
+
+_USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
+_CONSECUTIVE_UNDERSCORES = re.compile(r"__")
+
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 20
+
+
+def is_username_reserved(username: str) -> bool:
+    """Return True if the username is in the reserved blocklist (case-insensitive)."""
+    return username.strip().lower() in RESERVED_USERNAMES
+
+
+def validate_username_format(username: str) -> str | None:
+    """Validate username format rules.
+
+    Returns an error message string if the username is invalid, or None if valid.
+
+    Rules:
+      - 3 to 20 characters
+      - Only alphanumeric characters and underscores
+      - Cannot start or end with an underscore
+      - No consecutive underscores
+    """
+    if len(username) < USERNAME_MIN_LENGTH:
+        return f"Username must be at least {USERNAME_MIN_LENGTH} characters."
+
+    if len(username) > USERNAME_MAX_LENGTH:
+        return f"Username must be at most {USERNAME_MAX_LENGTH} characters."
+
+    if not _USERNAME_PATTERN.match(username):
+        if username.startswith("_") or username.endswith("_"):
+            return "Username cannot start or end with an underscore."
+        return "Username can only contain letters, numbers, and underscores."
+
+    if _CONSECUTIVE_UNDERSCORES.search(username):
+        return "Username cannot contain consecutive underscores."
+
+    return None
+```
+
+================================================================================
+FILE: backend/api/routes/auth.py  (modifications)
+================================================================================
+
+Add this import near the top of auth.py with the other service imports:
+
+```python
+from services.reserved_usernames import is_username_reserved, validate_username_format
+```
+
+Add this validation block inside the signup handler, immediately after parsing the
+request body and before creating the user account. Assuming the request schema has
+a `username` field:
+
+```python
+@router.post("/auth/signup", status_code=201)
+async def signup(request: SignupRequest, db: DB):
+    # --- Username validation (add this block) ---
+    format_error = validate_username_format(request.username)
+    if format_error is not None:
+        raise AppError(
+            status_code=422,
+            code="USERNAME_INVALID",
+            message=format_error,
+        )
+
+    if is_username_reserved(request.username):
+        raise AppError(
+            status_code=422,
+            code="USERNAME_RESERVED",
+            message="This username is not available.",
+        )
+    # --- End username validation ---
+
+    # ... existing signup logic (create Supabase Auth user, create DB user, etc.)
+```
+
+================================================================================
+FILE: backend/api/routes/users.py  (modifications)
+================================================================================
+
+Add this import near the top of users.py with the other service imports:
+
+```python
+from services.reserved_usernames import is_username_reserved, validate_username_format
+```
+
+Add this validation block inside the PATCH /me handler, only when the username
+field is present in the update payload:
+
+```python
+@router.patch("/me")
+async def update_profile(request: UpdateProfileRequest, db: DB, user: CurrentUser):
+    # --- Username validation when username is being changed (add this block) ---
+    if request.username is not None and request.username != user.username:
+        format_error = validate_username_format(request.username)
+        if format_error is not None:
+            raise AppError(
+                status_code=422,
+                code="USERNAME_INVALID",
+                message=format_error,
+            )
+
+        if is_username_reserved(request.username):
+            raise AppError(
+                status_code=422,
+                code="USERNAME_RESERVED",
+                message="This username is not available.",
+            )
+
+        # Check uniqueness against existing users
+        result = await db.execute(
+            select(User).where(
+                func.lower(User.username) == request.username.lower()
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            raise AppError(
+                status_code=409,
+                code="USERNAME_TAKEN",
+                message="This username is already taken.",
+            )
+    # --- End username validation ---
+
+    # ... existing update logic (apply changes, commit, return updated profile)
+```
+
+================================================================================
+FILE: backend/tests/test_reserved_usernames.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from services.reserved_usernames import (
+    RESERVED_USERNAMES,
+    is_username_reserved,
+    validate_username_format,
+)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — is_username_reserved
+# ---------------------------------------------------------------------------
+
+
+class TestIsUsernameReserved:
+    def test_reserved_words_are_caught(self):
+        for word in ["shelf", "admin", "api", "login", "goodreads", "booktok"]:
+            assert is_username_reserved(word) is True
+
+    def test_case_insensitivity(self):
+        assert is_username_reserved("Shelf") is True
+        assert is_username_reserved("ADMIN") is True
+        assert is_username_reserved("GoOdReAdS") is True
+        assert is_username_reserved("API") is True
+
+    def test_leading_trailing_whitespace_stripped(self):
+        assert is_username_reserved("  shelf  ") is True
+        assert is_username_reserved(" admin") is True
+
+    def test_non_reserved_usernames_pass(self):
+        assert is_username_reserved("bookworm42") is False
+        assert is_username_reserved("reader_jane") is False
+        assert is_username_reserved("avid_reader") is False
+
+    def test_reserved_set_is_frozen(self):
+        assert isinstance(RESERVED_USERNAMES, frozenset)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — validate_username_format
+# ---------------------------------------------------------------------------
+
+
+class TestValidateUsernameFormat:
+    def test_valid_usernames(self):
+        valid = [
+            "abc",
+            "user_name",
+            "a1b2c3",
+            "reader42",
+            "the_great_reader",
+            "a" * 20,
+            "ab",  # This is 2 chars — should fail, testing boundary
+        ]
+        # 3-char minimum
+        assert validate_username_format("abc") is None
+        assert validate_username_format("user_name") is None
+        assert validate_username_format("a1b2c3") is None
+        assert validate_username_format("reader42") is None
+        assert validate_username_format("the_great_reader") is None
+        assert validate_username_format("a" * 20) is None
+
+    def test_too_short(self):
+        error = validate_username_format("ab")
+        assert error is not None
+        assert "at least 3" in error
+
+        error = validate_username_format("a")
+        assert error is not None
+        assert "at least 3" in error
+
+        error = validate_username_format("")
+        assert error is not None
+        assert "at least 3" in error
+
+    def test_too_long(self):
+        error = validate_username_format("a" * 21)
+        assert error is not None
+        assert "at most 20" in error
+
+    def test_special_characters_rejected(self):
+        for username in ["user@name", "user name", "user-name", "user.name", "user!name"]:
+            error = validate_username_format(username)
+            assert error is not None, f"Expected rejection for '{username}'"
+
+    def test_leading_underscore_rejected(self):
+        error = validate_username_format("_username")
+        assert error is not None
+        assert "underscore" in error.lower()
+
+    def test_trailing_underscore_rejected(self):
+        error = validate_username_format("username_")
+        assert error is not None
+        assert "underscore" in error.lower()
+
+    def test_consecutive_underscores_rejected(self):
+        error = validate_username_format("user__name")
+        assert error is not None
+        assert "consecutive" in error.lower()
+
+    def test_triple_underscores_rejected(self):
+        error = validate_username_format("user___name")
+        assert error is not None
+        assert "consecutive" in error.lower()
+
+    def test_single_char_boundary(self):
+        # Single alphanumeric char is too short (min is 3)
+        error = validate_username_format("a")
+        assert error is not None
+
+    def test_exactly_three_chars(self):
+        assert validate_username_format("abc") is None
+
+    def test_exactly_twenty_chars(self):
+        assert validate_username_format("a" * 20) is None
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — signup with reserved username
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_signup_reserved_username_returns_422(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "newuser@example.com",
+            "password": "SecurePass123!",
+            "username": "admin",
+        },
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "USERNAME_RESERVED"
+
+
+@pytest.mark.asyncio
+async def test_signup_invalid_format_returns_422(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "newuser@example.com",
+            "password": "SecurePass123!",
+            "username": "_bad_start",
+        },
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "USERNAME_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_signup_valid_username_proceeds(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "newuser@example.com",
+            "password": "SecurePass123!",
+            "username": "bookworm42",
+        },
+    )
+    # Should not be blocked by username validation (may fail for other reasons
+    # in test env, but should not be 422 with USERNAME_RESERVED or USERNAME_INVALID)
+    assert response.status_code != 422 or response.json()["error"]["code"] not in (
+        "USERNAME_RESERVED",
+        "USERNAME_INVALID",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — PATCH /me with reserved username
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_profile_reserved_username_returns_422(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    # Assuming client fixture has an authenticated user
+    response = await client.patch(
+        "/api/v1/me",
+        json={"username": "shelf"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "USERNAME_RESERVED"
+
+
+@pytest.mark.asyncio
+async def test_update_profile_invalid_username_returns_422(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    response = await client.patch(
+        "/api/v1/me",
+        json={"username": "ab"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "USERNAME_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_update_profile_consecutive_underscores_returns_422(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    response = await client.patch(
+        "/api/v1/me",
+        json={"username": "my__name"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "USERNAME_INVALID"
+```
+
+================================================================================
+FILE: ios/Shelf/Services/UsernameValidator.swift
+================================================================================
+
+```swift
+import Foundation
+
+@Observable
+final class UsernameValidator {
+    static let shared = UsernameValidator()
+
+    private static let reservedUsernames: Set<String> = [
+        // Product / brand
+        "shelf", "shelfapp", "admin", "administrator", "moderator", "mod",
+        "support", "help", "official", "team", "staff", "system",
+
+        // Routes / URL conflicts
+        "api", "auth", "login", "signup", "register", "settings", "profile",
+        "feed", "search", "explore", "discover", "import", "export",
+        "notifications", "messages", "books", "shelves", "users", "me",
+    ]
+
+    private static let usernameMinLength = 3
+    private static let usernameMaxLength = 20
+    private static let allowedPattern = try! NSRegularExpression(
+        pattern: "^[a-zA-Z0-9][a-zA-Z0-9_]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$"
+    )
+    private static let consecutiveUnderscorePattern = try! NSRegularExpression(
+        pattern: "__"
+    )
+
+    private init() {}
+
+    /// Validate a username against local rules.
+    /// Returns a tuple of (isValid, errorMessage).
+    /// When isValid is true, errorMessage is nil.
+    func isUsernameValid(_ username: String) -> (Bool, String?) {
+        let trimmed = username.trimmingCharacters(in: .whitespaces)
+
+        if trimmed.count < Self.usernameMinLength {
+            return (false, "Username must be at least \(Self.usernameMinLength) characters.")
+        }
+
+        if trimmed.count > Self.usernameMaxLength {
+            return (false, "Username must be at most \(Self.usernameMaxLength) characters.")
+        }
+
+        let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        if trimmed.hasPrefix("_") || trimmed.hasSuffix("_") {
+            return (false, "Username cannot start or end with an underscore.")
+        }
+
+        let matchCount = Self.allowedPattern.numberOfMatches(
+            in: trimmed,
+            range: range
+        )
+        if matchCount == 0 {
+            return (false, "Username can only contain letters, numbers, and underscores.")
+        }
+
+        let consecutiveCount = Self.consecutiveUnderscorePattern.numberOfMatches(
+            in: trimmed,
+            range: range
+        )
+        if consecutiveCount > 0 {
+            return (false, "Username cannot contain consecutive underscores.")
+        }
+
+        if Self.reservedUsernames.contains(trimmed.lowercased()) {
+            return (false, "This username is not available.")
+        }
+
+        return (true, nil)
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Auth/SignUpView.swift  (modifications)
+================================================================================
+
+Add the following properties and validation logic to the existing SignUpView.
+This shows the complete relevant sections to add or integrate.
+
+```swift
+import SwiftUI
+import Combine
+
+struct SignUpView: View {
+    // --- Existing properties (email, password, etc.) ---
+
+    @State private var username: String = ""
+    @State private var usernameError: String?
+    @State private var isCheckingUsername: Bool = false
+    @State private var usernameDebounceTask: Task<Void, Never>?
+    @State private var email: String = ""
+    @State private var password: String = ""
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String?
+
+    private let usernameValidator = UsernameValidator.shared
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    // --- Username field with real-time validation ---
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("Username", text: $username)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .onChange(of: username) { _, newValue in
+                                validateUsernameDebounced(newValue)
+                            }
+
+                        if let usernameError {
+                            Text(usernameError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+
+                        if isCheckingUsername {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                Text("Checking availability...")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    TextField("Email", text: $email)
+                        .textContentType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.emailAddress)
+
+                    SecureField("Password", text: $password)
+                        .textContentType(.newPassword)
+                } header: {
+                    Text("Account Details")
+                }
+
+                Section {
+                    Button {
+                        Task {
+                            await signUp()
+                        }
+                    } label: {
+                        if isLoading {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Text("Create Account")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .disabled(isLoading || !isFormValid)
+                }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Sign Up")
+        }
+    }
+
+    private var isFormValid: Bool {
+        usernameError == nil
+            && !username.isEmpty
+            && !email.isEmpty
+            && !password.isEmpty
+            && !isCheckingUsername
+    }
+
+    private func validateUsernameDebounced(_ value: String) {
+        // Cancel any existing debounce task
+        usernameDebounceTask?.cancel()
+
+        // Immediate local validation
+        let (isValid, localError) = usernameValidator.isUsernameValid(value)
+        if !isValid {
+            usernameError = localError
+            return
+        }
+
+        // Clear error for now; debounce server check
+        usernameError = nil
+
+        // Debounce server-side availability check (500ms)
+        usernameDebounceTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+
+            guard !Task.isCancelled else { return }
+
+            await checkUsernameAvailability(value)
+        }
+    }
+
+    @MainActor
+    private func checkUsernameAvailability(_ username: String) async {
+        isCheckingUsername = true
+        defer { isCheckingUsername = false }
+
+        // Server-side availability check can be added here when the endpoint
+        // is available. For now, local validation is sufficient.
+        // Example future implementation:
+        // do {
+        //     let response: UsernameCheckResponse = try await APIClient.shared.request(
+        //         method: .get,
+        //         path: "/users/check-username",
+        //         queryItems: [URLQueryItem(name: "username", value: username)]
+        //     )
+        //     if !response.available {
+        //         usernameError = "This username is already taken."
+        //     }
+        // } catch {
+        //     // Silently fail — server will catch it on submit
+        // }
+    }
+
+    @MainActor
+    private func signUp() async {
+        // Final local validation before submit
+        let (isValid, localError) = usernameValidator.isUsernameValid(username)
+        if !isValid {
+            usernameError = localError
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let body: [String: String] = [
+                "username": username,
+                "email": email,
+                "password": password,
+            ]
+            let _: SignUpResponse = try await APIClient.shared.request(
+                method: .post,
+                path: "/auth/signup",
+                body: body
+            )
+            // Handle successful signup (navigate to main app, etc.)
+        } catch let error as APIError {
+            switch error.code {
+            case "USERNAME_RESERVED", "USERNAME_INVALID":
+                usernameError = error.message
+            case "USERNAME_TAKEN":
+                usernameError = "This username is already taken."
+            default:
+                errorMessage = error.message
+            }
+        } catch {
+            errorMessage = "An unexpected error occurred. Please try again."
+        }
+
+        isLoading = false
+    }
+}
+```

@@ -1,0 +1,39 @@
+name: iOS CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**"]
+  pull_request:
+    branches: [main]
+    paths: ["ios/**"]
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+      - name: Build
+        working-directory: ios/Shelf
+        run: |
+          xcodebuild build-for-testing \
+            -project Shelf.xcodeproj \
+            -scheme Shelf \
+            -destination "platform=iOS Simulator,name=iPhone 15,OS=17.5" \
+            -quiet
+      - name: Test
+        working-directory: ios/Shelf
+        run: |
+          xcodebuild test \
+            -project Shelf.xcodeproj \
+            -scheme Shelf \
+            -destination "platform=iOS Simulator,name=iPhone 15,OS=17.5" \
+            -quiet \
+            -resultBundlePath TestResults.xcresult
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-test-results
+          path: ios/Shelf/TestResults.xcresult

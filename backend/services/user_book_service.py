@@ -62,12 +62,13 @@ async def log_book(
         has_spoilers=request.has_spoilers,
         started_at=request.started_at,
         finished_at=request.finished_at,
+        is_private=request.is_private,
     )
     db.add(user_book)
     await db.flush()
 
-    # Create activity
-    if request.status in ("read", "reading"):
+    # Create activity (private books don't generate feed entries)
+    if request.status in ("read", "reading") and not request.is_private:
         activity_type = "finished_book" if request.status == "read" else "started_book"
         activity = Activity(
             user_id=user_id,
@@ -118,10 +119,12 @@ async def update_book(
         user_book.started_at = request.started_at
     if request.finished_at is not None:
         user_book.finished_at = request.finished_at
+    if request.is_private is not None:
+        user_book.is_private = request.is_private
 
-    # Create activity on status change to read/reading
+    # Create activity on status change to read/reading (private books are silent)
     new_status = user_book.status
-    if new_status != old_status and new_status in ("read", "reading"):
+    if new_status != old_status and new_status in ("read", "reading") and not user_book.is_private:
         activity_type = "finished_book" if new_status == "read" else "started_book"
         activity = Activity(
             user_id=user_id,
@@ -180,6 +183,11 @@ async def list_user_books(
         raise blocked_user()
 
     stmt = select(UserBook).where(UserBook.user_id == target_user_id)
+
+    # Hide private books when viewing another user's library
+    if str(requesting_user_id) != str(target_user_id):
+        stmt = stmt.where(UserBook.is_private == False)  # noqa: E712
+
     if status_filter:
         stmt = stmt.where(UserBook.status == status_filter)
     stmt = stmt.order_by(UserBook.created_at.desc(), UserBook.id.desc())
@@ -253,6 +261,7 @@ def _to_response(user_book: UserBook, work: Work | None) -> UserBookResponse:
         started_at=user_book.started_at,
         finished_at=user_book.finished_at,
         is_imported=user_book.is_imported,
+        is_private=user_book.is_private,
         created_at=user_book.created_at,
         updated_at=user_book.updated_at,
         book=book_brief,

@@ -75,7 +75,7 @@ final class CachedUserBook {
 @Model
 final class PendingAction {
     @Attribute(.unique) var id: UUID
-    var actionType: String  // "log_book", "update_book", "delete_book"
+    var actionType: String  // "log_book", "update_book", "delete_book", "add_to_shelf", "remove_from_shelf"
     var payload: Data       // JSON-encoded request body
     var createdAt: Date
     var retryCount: Int
@@ -126,6 +126,66 @@ final class OfflineStore {
         try? context.save()
     }
 
+    // MARK: - Cache Queries
+
+    @MainActor
+    func getCachedBook(id: UUID) -> CachedBook? {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<CachedBook>(
+            predicate: #Predicate { $0.bookID == id }
+        )
+        return try? context.fetch(descriptor).first
+    }
+
+    @MainActor
+    func getCachedUserBooks(status: String? = nil) -> [CachedUserBook] {
+        let context = container.mainContext
+        var descriptor: FetchDescriptor<CachedUserBook>
+        if let status {
+            descriptor = FetchDescriptor<CachedUserBook>(
+                predicate: #Predicate { $0.status == status },
+                sortBy: [SortDescriptor(\.cachedAt, order: .reverse)]
+            )
+        } else {
+            descriptor = FetchDescriptor<CachedUserBook>(
+                sortBy: [SortDescriptor(\.cachedAt, order: .reverse)]
+            )
+        }
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    @MainActor
+    func cacheUserBook(_ userBook: UserBook) {
+        let context = container.mainContext
+        let cached = CachedUserBook(from: userBook)
+        context.insert(cached)
+        try? context.save()
+    }
+
+    // MARK: - Cache Cleanup
+
+    @MainActor
+    func cleanupOldCache(olderThan days: Int = 30) {
+        let context = container.mainContext
+        let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? Date()
+
+        let bookDescriptor = FetchDescriptor<CachedBook>(
+            predicate: #Predicate { $0.cachedAt < cutoff }
+        )
+        if let oldBooks = try? context.fetch(bookDescriptor) {
+            for book in oldBooks { context.delete(book) }
+        }
+
+        let userBookDescriptor = FetchDescriptor<CachedUserBook>(
+            predicate: #Predicate { $0.cachedAt < cutoff }
+        )
+        if let oldUserBooks = try? context.fetch(userBookDescriptor) {
+            for ub in oldUserBooks { context.delete(ub) }
+        }
+
+        try? context.save()
+    }
+
     // MARK: - Queue Offline Actions
 
     @MainActor
@@ -150,5 +210,12 @@ final class OfflineStore {
         let context = container.mainContext
         context.delete(action)
         try? context.save()
+    }
+
+    @MainActor
+    func pendingActionCount() -> Int {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<PendingAction>()
+        return (try? context.fetchCount(descriptor)) ?? 0
     }
 }

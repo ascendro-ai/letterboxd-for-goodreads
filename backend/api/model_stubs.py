@@ -205,6 +205,7 @@ class User(TimestampMixin, Base):
     is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    hide_reading_stats: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 # --- User book domain ---
@@ -224,6 +225,7 @@ class UserBook(TimestampMixin, Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     is_imported: Mapped[bool] = mapped_column(Boolean, default=False)
     is_hidden: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped["User"] = relationship(lazy="selectin")
     work: Mapped["Work"] = relationship(lazy="selectin")
@@ -308,6 +310,15 @@ class Notification(Base):
     data: Mapped[Optional[dict]] = _jsonb_col(nullable=True)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DeviceToken(TimestampMixin, Base):
+    __tablename__ = "device_tokens"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    token: Mapped[str] = mapped_column(String(512), unique=True)
+    platform: Mapped[str] = mapped_column(String(10), default="ios")
 
 
 class ImportJob(Base):
@@ -422,3 +433,93 @@ class UserContactHash(TimestampMixin, Base):
     user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
     hash: Mapped[str] = mapped_column(String(64))
     hash_type: Mapped[str] = mapped_column(String(10))
+
+
+# --- Series domain ---
+
+
+class Series(TimestampMixin, Base):
+    __tablename__ = "series"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    name: Mapped[str] = mapped_column(String(300))
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    total_books: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    cover_image_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    open_library_series_id: Mapped[Optional[str]] = mapped_column(
+        String(50), unique=True, nullable=True
+    )
+
+    works: Mapped[List["SeriesWork"]] = relationship(
+        back_populates="series", order_by="SeriesWork.position"
+    )
+
+
+class SeriesWork(TimestampMixin, Base):
+    __tablename__ = "series_works"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    series_id: Mapped[uuid.UUID] = _fk_uuid_col("series.id", index=True)
+    work_id: Mapped[uuid.UUID] = _fk_uuid_col("works.id", index=True)
+    position: Mapped[Decimal] = mapped_column(Numeric(5, 1))
+    is_main_entry: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    series: Mapped["Series"] = relationship(back_populates="works")
+    work: Mapped["Work"] = relationship(lazy="selectin")
+
+
+# --- Reading challenges domain ---
+
+
+class ReadingChallenge(TimestampMixin, Base):
+    __tablename__ = "reading_challenges"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    year: Mapped[int] = mapped_column(Integer)
+    goal_count: Mapped[int] = mapped_column(Integer)
+    current_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChallengeBook(TimestampMixin, Base):
+    __tablename__ = "challenge_books"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    challenge_id: Mapped[uuid.UUID] = _fk_uuid_col("reading_challenges.id", index=True)
+    user_book_id: Mapped[uuid.UUID] = _fk_uuid_col("user_books.id", index=True)
+
+
+# --- Content tags domain ---
+
+
+class WorkContentTag(TimestampMixin, Base):
+    """Community-voted content tag on a work.
+
+    Tags come from a predefined set (CONTENT_WARNING_TAGS + MOOD_TAGS).
+    Each user can vote once per (work, tag) pair. A tag is "confirmed" when
+    it reaches the vote threshold.
+    """
+
+    __tablename__ = "work_content_tags"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    work_id: Mapped[uuid.UUID] = _fk_uuid_col("works.id", index=True)
+    tag_name: Mapped[str] = mapped_column(String(50))
+    tag_type: Mapped[str] = mapped_column(String(20))
+    vote_count: Mapped[int] = mapped_column(Integer, default=1)
+    is_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class WorkContentTagVote(Base):
+    """One vote per user per (work, tag). Prevents double-voting."""
+
+    __tablename__ = "work_content_tag_votes"
+
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", primary_key=True, default=False)
+    work_content_tag_id: Mapped[uuid.UUID] = _fk_uuid_col(
+        "work_content_tags.id", primary_key=True, default=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

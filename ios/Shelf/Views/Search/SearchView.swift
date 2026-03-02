@@ -3,6 +3,7 @@ import SwiftUI
 struct SearchView: View {
     @State private var viewModel = SearchViewModel()
     @State private var showScanner = false
+    @State private var scannedBookID: UUID?
 
     var body: some View {
         List {
@@ -39,14 +40,17 @@ struct SearchView: View {
                 } label: {
                     Image(systemName: "barcode.viewfinder")
                 }
+                .accessibilityLabel("Scan barcode")
             }
         }
         .sheet(isPresented: $showScanner) {
-            BarcodeScannerView { isbn in
+            BarcodeScannerView { book in
                 showScanner = false
-                viewModel.query = isbn
-                viewModel.search()
+                scannedBookID = book.id
             }
+        }
+        .navigationDestination(item: $scannedBookID) { bookID in
+            BookDetailView(bookID: bookID)
         }
     }
 }

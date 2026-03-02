@@ -153,6 +153,9 @@ async def get_book_reviews(
             UserBook.work_id == work_id,
             UserBook.review_text.isnot(None),
             UserBook.review_text != "",
+            UserBook.is_hidden == False,  # noqa: E712
+            # Show private reviews only to the review author
+            (UserBook.is_private == False) | (UserBook.user_id == requesting_user_id),  # noqa: E712
             UserBook.user_id.notin_(blocked_subquery),
             UserBook.user_id.notin_(blocked_by_subquery),
         )

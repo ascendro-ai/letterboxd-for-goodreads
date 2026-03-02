@@ -3,24 +3,28 @@ import SwiftUI
 struct UserAvatarView: View {
     let url: String?
     var size: CGFloat = 36
+    var username: String? = nil
 
     var body: some View {
-        if let url, let imageURL = URL(string: url) {
-            AsyncImage(url: imageURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: size, height: size)
-                        .clipShape(Circle())
-                default:
-                    placeholder
+        Group {
+            if let url, let imageURL = URL(string: url) {
+                AsyncImage(url: imageURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: size, height: size)
+                            .clipShape(Circle())
+                    default:
+                        placeholder
+                    }
                 }
+            } else {
+                placeholder
             }
-        } else {
-            placeholder
         }
+        .accessibilityLabel(username.map { "\($0)'s avatar" } ?? "User avatar")
     }
 
     private var placeholder: some View {

@@ -1,0 +1,7 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "infra/docker/Dockerfile.pipeline"
+watchPatterns = ["pipeline/**"]
+
+[deploy]
+restartPolicyType = "never"

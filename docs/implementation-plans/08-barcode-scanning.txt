@@ -1,0 +1,752 @@
+================================================================================
+08 — Barcode Scanning (ISBN Lookup)
+VisionKit DataScanner + manual ISBN entry + search integration
+================================================================================
+
+Feature: Scan a book's barcode (EAN-13/EAN-8) to look up the book by ISBN.
+Uses Apple's DataScannerViewController (VisionKit, iOS 16+) wrapped in
+UIViewControllerRepresentable. Includes manual ISBN entry fallback, ISBN
+validation, flashlight toggle, and integration with SearchView navigation.
+
+The existing BarcodeScannerView.swift stub uses AVCaptureSession directly.
+This plan replaces it entirely with the VisionKit DataScanner approach
+(higher level, better recognition) while keeping AVFoundation as a fallback
+for devices that do not support DataScanner.
+
+================================================================================
+FILE: ios/Shelf/Extensions/ISBNValidator.swift
+================================================================================
+
+```swift
+import Foundation
+
+enum ISBNValidator {
+
+    // MARK: - ISBN-10 Validation
+
+    /// Validate an ISBN-10 string using the check digit algorithm.
+    /// The last character may be 'X' representing 10.
+    static func isValidISBN10(_ isbn: String) -> Bool {
+        let cleaned = normalize(isbn)
+        guard cleaned.count == 10 else { return false }
+
+        let chars = Array(cleaned)
+        var sum = 0
+
+        for i in 0..<9 {
+            guard let digit = chars[i].wholeNumberValue else { return false }
+            sum += digit * (10 - i)
+        }
+
+        // Last character can be 'X' (value 10) or a digit
+        let lastChar = chars[9]
+        if lastChar == "X" || lastChar == "x" {
+            sum += 10
+        } else if let digit = lastChar.wholeNumberValue {
+            sum += digit
+        } else {
+            return false
+        }
+
+        return sum % 11 == 0
+    }
+
+    // MARK: - ISBN-13 Validation
+
+    /// Validate an ISBN-13 string using the modulo-10 check digit algorithm.
+    static func isValidISBN13(_ isbn: String) -> Bool {
+        let cleaned = normalize(isbn)
+        guard cleaned.count == 13 else { return false }
+
+        let digits = cleaned.compactMap { $0.wholeNumberValue }
+        guard digits.count == 13 else { return false }
+
+        var sum = 0
+        for i in 0..<12 {
+            sum += digits[i] * (i.isMultiple(of: 2) ? 1 : 3)
+        }
+
+        let checkDigit = (10 - (sum % 10)) % 10
+        return checkDigit == digits[12]
+    }
+
+    // MARK: - Combined Validation
+
+    /// Check if a string is a valid ISBN (either 10 or 13 digits).
+    static func isValid(_ isbn: String) -> Bool {
+        let cleaned = normalize(isbn)
+        switch cleaned.count {
+        case 10: return isValidISBN10(cleaned)
+        case 13: return isValidISBN13(cleaned)
+        default: return false
+        }
+    }
+
+    // MARK: - Normalization
+
+    /// Strip hyphens, spaces, and whitespace from an ISBN string.
+    static func normalize(_ isbn: String) -> String {
+        isbn.replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            .trimmingCharacters(in: .whitespaces)
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/ViewModels/BarcodeScannerViewModel.swift
+================================================================================
+
+```swift
+import Foundation
+
+@Observable
+final class BarcodeScannerViewModel {
+    private(set) var scannedISBN: String?
+    private(set) var foundBook: Book?
+    private(set) var isSearching = false
+    private(set) var error: Error?
+    private(set) var errorMessage: String?
+    var isTorchOn = false
+
+    private let bookService = BookService.shared
+    private var hasProcessed = false
+
+    // MARK: - Process Scanned Barcode
+
+    @MainActor
+    func processBarcode(_ code: String) async {
+        // Prevent duplicate processing from rapid scans
+        guard !hasProcessed, !isSearching else { return }
+        hasProcessed = true
+
+        let cleaned = ISBNValidator.normalize(code)
+
+        guard ISBNValidator.isValid(cleaned) else {
+            errorMessage = "The scanned barcode is not a valid ISBN."
+            hasProcessed = false
+            return
+        }
+
+        scannedISBN = cleaned
+        await lookupISBN(cleaned)
+    }
+
+    // MARK: - Manual ISBN Lookup
+
+    @MainActor
+    func lookupISBN(_ isbn: String) async {
+        let cleaned = ISBNValidator.normalize(isbn)
+
+        guard ISBNValidator.isValid(cleaned) else {
+            errorMessage = "Please enter a valid ISBN (10 or 13 digits)."
+            return
+        }
+
+        isSearching = true
+        error = nil
+        errorMessage = nil
+
+        do {
+            let book = try await bookService.lookupISBN(cleaned)
+            foundBook = book
+        } catch let apiError as APIError {
+            switch apiError {
+            case .notFound:
+                errorMessage = "No book found for ISBN \(cleaned). Try searching by title instead."
+            default:
+                error = apiError
+                errorMessage = apiError.localizedDescription
+            }
+        } catch {
+            self.error = error
+            errorMessage = "Something went wrong. Please try again."
+        }
+
+        isSearching = false
+    }
+
+    // MARK: - Reset
+
+    func reset() {
+        scannedISBN = nil
+        foundBook = nil
+        isSearching = false
+        error = nil
+        errorMessage = nil
+        hasProcessed = false
+    }
+
+    // MARK: - Toggle Torch
+
+    func toggleTorch() {
+        isTorchOn.toggle()
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Search/BarcodeScannerView.swift  (complete rewrite)
+================================================================================
+
+```swift
+import SwiftUI
+import AVFoundation
+import VisionKit
+
+struct BarcodeScannerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var viewModel = BarcodeScannerViewModel()
+    @State private var showManualEntry = false
+    @State private var navigateToBook: Book?
+
+    var onBookFound: ((Book) -> Void)?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+                    DataScannerRepresentable(
+                        isTorchOn: viewModel.isTorchOn,
+                        onBarcode: { code in
+                            Task {
+                                await viewModel.processBarcode(code)
+                            }
+                        }
+                    )
+                    .ignoresSafeArea()
+                } else {
+                    // Fallback to AVFoundation scanner for unsupported devices
+                    AVBarcodeScannerRepresentable(
+                        isTorchOn: viewModel.isTorchOn,
+                        onBarcode: { code in
+                            Task {
+                                await viewModel.processBarcode(code)
+                            }
+                        }
+                    )
+                    .ignoresSafeArea()
+                }
+
+                // Overlay UI
+                VStack {
+                    Spacer()
+
+                    // Scanning indicator
+                    if viewModel.isSearching {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .tint(.white)
+                            Text("Looking up book...")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                    }
+
+                    // Error message
+                    if let message = viewModel.errorMessage {
+                        Text(message)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
+                            .background(Color.red.opacity(0.85))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .padding(.horizontal, 24)
+                            .onTapGesture {
+                                viewModel.reset()
+                            }
+                    }
+
+                    if !viewModel.isSearching && viewModel.errorMessage == nil {
+                        Text("Point your camera at a book's barcode")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Capsule())
+                    }
+
+                    // Bottom toolbar
+                    HStack(spacing: 32) {
+                        // Flashlight toggle
+                        Button {
+                            viewModel.toggleTorch()
+                        } label: {
+                            Image(systemName: viewModel.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                                .font(.title2)
+                                .foregroundStyle(.white)
+                                .frame(width: 50, height: 50)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+
+                        // Manual entry button
+                        Button {
+                            showManualEntry = true
+                        } label: {
+                            VStack(spacing: 4) {
+                                Image(systemName: "keyboard")
+                                    .font(.title2)
+                                Text("Type ISBN")
+                                    .font(.caption2)
+                            }
+                            .foregroundStyle(.white)
+                            .frame(width: 80, height: 50)
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                    .padding(.bottom, 40)
+                }
+            }
+            .navigationTitle("Scan Barcode")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showManualEntry) {
+                ManualISBNEntryView { book in
+                    showManualEntry = false
+                    handleBookFound(book)
+                }
+            }
+            .onChange(of: viewModel.foundBook) { _, newBook in
+                if let book = newBook {
+                    handleBookFound(book)
+                }
+            }
+        }
+    }
+
+    private func handleBookFound(_ book: Book) {
+        if let onBookFound {
+            onBookFound(book)
+        }
+        dismiss()
+    }
+}
+
+// MARK: - VisionKit DataScanner (Primary)
+
+struct DataScannerRepresentable: UIViewControllerRepresentable {
+    let isTorchOn: Bool
+    let onBarcode: (String) -> Void
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(
+            recognizedDataTypes: [.barcode(symbologies: [.ean13, .ean8])],
+            qualityLevel: .balanced,
+            recognizesMultipleItems: false,
+            isHighFrameRateTrackingEnabled: false,
+            isHighlightingEnabled: true
+        )
+        scanner.delegate = context.coordinator
+        return scanner
+    }
+
+    func updateUIViewController(_ scanner: DataScannerViewController, context: Context) {
+        // Start scanning if not already running
+        if !scanner.isScanning {
+            try? scanner.startScanning()
+        }
+
+        // Update torch state
+        if scanner.isScanning {
+            if isTorchOn {
+                guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return }
+                try? device.lockForConfiguration()
+                device.torchMode = .on
+                device.unlockForConfiguration()
+            } else {
+                guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return }
+                try? device.lockForConfiguration()
+                device.torchMode = .off
+                device.unlockForConfiguration()
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onBarcode: onBarcode)
+    }
+
+    class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        let onBarcode: (String) -> Void
+        private var hasScanned = false
+
+        init(onBarcode: @escaping (String) -> Void) {
+            self.onBarcode = onBarcode
+        }
+
+        func dataScanner(
+            _ dataScanner: DataScannerViewController,
+            didAdd addedItems: [RecognizedItem],
+            allItems: [RecognizedItem]
+        ) {
+            guard !hasScanned else { return }
+            for item in addedItems {
+                if case .barcode(let barcode) = item,
+                   let value = barcode.payloadStringValue {
+                    hasScanned = true
+                    AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+                    onBarcode(value)
+                    dataScanner.stopScanning()
+                    return
+                }
+            }
+        }
+    }
+}
+
+// MARK: - AVFoundation Fallback Scanner
+
+struct AVBarcodeScannerRepresentable: UIViewControllerRepresentable {
+    let isTorchOn: Bool
+    let onBarcode: (String) -> Void
+
+    func makeUIViewController(context: Context) -> AVBarcodeScannerController {
+        let controller = AVBarcodeScannerController()
+        controller.onScan = onBarcode
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVBarcodeScannerController, context: Context) {
+        controller.setTorch(isTorchOn)
+    }
+}
+
+final class AVBarcodeScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    var onScan: ((String) -> Void)?
+
+    private let captureSession = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var hasScanned = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        setupCamera()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.bounds
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        if !captureSession.isRunning {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.captureSession.startRunning()
+            }
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if captureSession.isRunning {
+            captureSession.stopRunning()
+        }
+    }
+
+    func setTorch(_ on: Bool) {
+        guard let device = AVCaptureDevice.default(for: .video),
+              device.hasTorch else { return }
+        try? device.lockForConfiguration()
+        device.torchMode = on ? .on : .off
+        device.unlockForConfiguration()
+    }
+
+    private func setupCamera() {
+        guard let device = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device) else { return }
+
+        if captureSession.canAddInput(input) {
+            captureSession.addInput(input)
+        }
+
+        let output = AVCaptureMetadataOutput()
+        if captureSession.canAddOutput(output) {
+            captureSession.addOutput(output)
+            output.setMetadataObjectsDelegate(self, queue: .main)
+            output.metadataObjectTypes = [.ean13, .ean8]
+        }
+
+        let layer = AVCaptureVideoPreviewLayer(session: captureSession)
+        layer.videoGravity = .resizeAspectFill
+        layer.frame = view.bounds
+        view.layer.addSublayer(layer)
+        previewLayer = layer
+    }
+
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard !hasScanned,
+              let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              let isbn = object.stringValue else { return }
+
+        hasScanned = true
+        AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+        onScan?(isbn)
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Search/ManualISBNEntryView.swift
+================================================================================
+
+```swift
+import SwiftUI
+
+struct ManualISBNEntryView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var isbn = ""
+    @State private var viewModel = BarcodeScannerViewModel()
+
+    let onBookFound: (Book) -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Enter ISBN")
+                        .font(.headline)
+
+                    Text("Type the 10 or 13-digit ISBN found on the book's back cover or copyright page.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField("ISBN (e.g. 978-0-13-468599-1)", text: $isbn)
+                        .keyboardType(.numberPad)
+                        .textContentType(.none)
+                        .font(.title3.monospaced())
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .onChange(of: isbn) { _, newValue in
+                            // Only allow digits, hyphens, spaces, and X (for ISBN-10 check digit)
+                            let filtered = newValue.filter { $0.isNumber || $0 == "-" || $0 == " " || $0 == "X" || $0 == "x" }
+                            if filtered != newValue {
+                                isbn = filtered
+                            }
+                        }
+
+                    if !isbn.isEmpty && !isValidInput {
+                        Text("Enter a valid 10 or 13-digit ISBN")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                Button {
+                    Task {
+                        await viewModel.lookupISBN(isbn)
+                    }
+                } label: {
+                    if viewModel.isSearching {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    } else {
+                        Text("Look Up Book")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!isValidInput || viewModel.isSearching)
+
+                if let message = viewModel.errorMessage {
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                }
+
+                Spacer()
+            }
+            .padding(24)
+            .navigationTitle("Enter ISBN")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .onChange(of: viewModel.foundBook) { _, newBook in
+                if let book = newBook {
+                    onBookFound(book)
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private var isValidInput: Bool {
+        let cleaned = ISBNValidator.normalize(isbn)
+        return ISBNValidator.isValid(cleaned)
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Search/SearchView.swift  (modifications)
+================================================================================
+
+Update the existing SearchView to pass the found book into the navigation
+stack instead of just setting the query. Replace the current .sheet and
+toolbar barcode button with the new integration:
+
+```swift
+import SwiftUI
+
+struct SearchView: View {
+    @State private var viewModel = SearchViewModel()
+    @State private var showScanner = false
+    @State private var scannedBook: Book?
+
+    var body: some View {
+        List {
+            if viewModel.isSearching && viewModel.results.isEmpty {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
+                .listRowSeparator(.hidden)
+            } else if viewModel.hasSearched && viewModel.results.isEmpty {
+                ContentUnavailableView.search(text: viewModel.query)
+            } else {
+                ForEach(viewModel.results) { book in
+                    NavigationLink(value: book) {
+                        BookCard(book: book, size: .medium)
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .searchable(text: $viewModel.query, prompt: "Search books, authors...")
+        .onChange(of: viewModel.query) {
+            viewModel.search()
+        }
+        .navigationTitle("Search")
+        .navigationDestination(for: Book.self) { book in
+            BookDetailView(bookID: book.id)
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showScanner = true
+                } label: {
+                    Image(systemName: "barcode.viewfinder")
+                }
+            }
+        }
+        .sheet(isPresented: $showScanner) {
+            BarcodeScannerView { book in
+                showScanner = false
+                scannedBook = book
+            }
+        }
+        .navigationDestination(item: $scannedBook) { book in
+            BookDetailView(bookID: book.id)
+        }
+    }
+}
+```
+
+================================================================================
+BACKEND REFERENCE: GET /books/isbn/{isbn} (already exists)
+================================================================================
+
+The backend endpoint is implemented in backend/api/routes/books.py.
+The iOS BookService.lookupISBN calls this endpoint. Here is what the
+backend service does for reference (no changes needed):
+
+```python
+# backend/services/book_service.py — lookup_by_isbn (existing)
+
+async def lookup_by_isbn(db: AsyncSession, isbn: str) -> BookDetailResponse:
+    """Look up a book by ISBN. Checks local DB first, then Open Library.
+
+    1. Normalize ISBN (strip hyphens/spaces)
+    2. Query editions table by isbn_13 or isbn_10
+    3. If found, resolve to work and return full book detail
+    4. If not found locally, call Open Library API: /isbn/{isbn}.json
+    5. If found on OL, create work + edition in our DB, then return
+    6. If not found anywhere, raise book_not_found()
+    """
+    cleaned = isbn.replace("-", "").replace(" ", "").strip()
+
+    # Try isbn_13
+    result = await db.execute(
+        select(Edition).where(Edition.isbn_13 == cleaned)
+    )
+    edition = result.scalar_one_or_none()
+
+    # Try isbn_10
+    if edition is None:
+        result = await db.execute(
+            select(Edition).where(Edition.isbn_10 == cleaned)
+        )
+        edition = result.scalar_one_or_none()
+
+    if edition is not None:
+        work_result = await db.execute(
+            select(Work).where(Work.id == edition.work_id)
+        )
+        work = work_result.scalar_one_or_none()
+        if work is not None:
+            return _to_book_detail(work)
+
+    # Fallback: Open Library API
+    ol_book = await _fetch_from_open_library(cleaned)
+    if ol_book is None:
+        raise book_not_found()
+
+    # Create work + edition from OL data
+    work, edition = await _create_from_open_library(db, ol_book)
+    return _to_book_detail(work)
+```
+
+The route handler:
+
+```python
+# backend/api/routes/books.py (existing)
+
+@router.get("/books/isbn/{isbn}", response_model=BookDetailResponse)
+async def lookup_isbn(
+    isbn: str,
+    db: DB,
+    current_user: CurrentUser,
+) -> BookDetailResponse:
+    """Look up a book by ISBN (barcode scan or manual entry)."""
+    return await book_service.lookup_by_isbn(db, isbn)
+```
+
+================================================================================
+CAMERA PERMISSION: Info.plist
+================================================================================
+
+Ensure the following key is in the Xcode project's Info.plist:
+
+```xml
+<key>NSCameraUsageDescription</key>
+<string>Shelf uses your camera to scan book barcodes for quick ISBN lookup.</string>
+```
+
+This should already be present since the barcode scanner stub existed, but
+verify it is set in the Xcode project.

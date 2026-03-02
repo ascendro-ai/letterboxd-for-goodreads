@@ -71,7 +71,7 @@ def upgrade() -> None:
     op.create_table('activities',
     sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('user_id', sa.Uuid(), nullable=False),
-    sa.Column('activity_type', sa.Enum('FINISHED_BOOK', 'STARTED_BOOK', name='activitytype'), nullable=False),
+    sa.Column('activity_type', sa.String(30), nullable=False),
     sa.Column('target_id', sa.Uuid(), nullable=False),
     sa.Column('metadata', postgresql.JSONB(), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
@@ -94,7 +94,7 @@ def upgrade() -> None:
     sa.Column('publisher', sa.String(length=300), nullable=True),
     sa.Column('publish_date', sa.String(length=50), nullable=True),
     sa.Column('page_count', sa.Integer(), nullable=True),
-    sa.Column('format', sa.Enum('HARDCOVER', 'PAPERBACK', 'EBOOK', 'AUDIOBOOK', name='editionformat'), nullable=True),
+    sa.Column('format', sa.String(50), nullable=True),
     sa.Column('language', sa.String(length=10), nullable=True),
     sa.Column('cover_image_url', sa.String(length=500), nullable=True),
     sa.Column('open_library_edition_id', sa.String(length=50), nullable=True),
@@ -150,7 +150,7 @@ def upgrade() -> None:
     op.create_table('user_books',
     sa.Column('user_id', sa.Uuid(), nullable=False),
     sa.Column('work_id', sa.Uuid(), nullable=False),
-    sa.Column('status', sa.Enum('READING', 'READ', 'WANT_TO_READ', 'DID_NOT_FINISH', name='readingstatus'), nullable=False),
+    sa.Column('status', sa.String(20), nullable=False),
     sa.Column('rating', sa.Numeric(precision=2, scale=1), nullable=True),
     sa.Column('review_text', sa.Text(), nullable=True),
     sa.Column('has_spoilers', sa.Boolean(), server_default='false', nullable=False),
@@ -208,6 +208,4 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_authors_open_library_author_id'), table_name='authors')
     op.drop_index('ix_authors_name_trgm', table_name='authors', postgresql_using='gin', postgresql_ops={'name': 'gin_trgm_ops'})
     op.drop_table('authors')
-    sa.Enum('FINISHED_BOOK', 'STARTED_BOOK', name='activitytype').drop(op.get_bind())
-    sa.Enum('HARDCOVER', 'PAPERBACK', 'EBOOK', 'AUDIOBOOK', name='editionformat').drop(op.get_bind())
-    sa.Enum('READING', 'READ', 'WANT_TO_READ', 'DID_NOT_FINISH', name='readingstatus').drop(op.get_bind())
+    # No enum types to drop — columns use plain String

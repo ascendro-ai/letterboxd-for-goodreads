@@ -1,0 +1,904 @@
+================================================================================
+IMPLEMENTATION PLAN: Backend Sentry + PostHog Observability
+================================================================================
+
+Feature: Backend error tracking (Sentry) and analytics events (PostHog) for the
+FastAPI server. Structured as a central observability module with request
+middleware and integration points into existing services.
+
+================================================================================
+FILE: backend/services/observability.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Module-level PostHog client reference. Set during init_posthog().
+_posthog_client: Any = None
+
+
+# ---------------------------------------------------------------------------
+# Sentry initialization
+# ---------------------------------------------------------------------------
+
+
+def init_sentry(dsn: str, environment: str) -> None:
+    """Initialize Sentry SDK with FastAPI and SQLAlchemy integrations.
+
+    Call this from the app lifespan startup. If dsn is empty, Sentry is not
+    initialized and all error capture calls become no-ops.
+    """
+    if not dsn:
+        logger.info("Sentry DSN not configured — skipping Sentry init")
+        return
+
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+    from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=environment,
+        traces_sample_rate=0.1,
+        profiles_sample_rate=0.1,
+        integrations=[
+            FastApiIntegration(transaction_style="endpoint"),
+            SqlalchemyIntegration(),
+        ],
+        before_send=_sentry_before_send,
+    )
+    logger.info("Sentry initialized (environment=%s)", environment)
+
+
+def _sentry_before_send(event: dict, hint: dict) -> dict | None:
+    """Filter Sentry events: drop 4xx client errors, only capture 5xx."""
+    if "exc_info" in hint:
+        exc_type, exc_value, _ = hint["exc_info"]
+
+        # Filter out FastAPI/Starlette HTTP exceptions with 4xx status codes
+        from fastapi import HTTPException
+
+        if isinstance(exc_value, HTTPException) and 400 <= exc_value.status_code < 500:
+            return None
+
+        # Also filter our custom AppError 4xx
+        from backend.api.errors import AppError
+
+        if isinstance(exc_value, AppError) and 400 <= exc_value.status_code < 500:
+            return None
+
+    return event
+
+
+def set_sentry_user(user_id: str, username: str | None = None) -> None:
+    """Attach user context to the current Sentry scope."""
+    try:
+        import sentry_sdk
+
+        sentry_sdk.set_user({"id": user_id, "username": username or ""})
+    except Exception:
+        pass  # Sentry not initialized — no-op
+
+
+def capture_exception(error: Exception, context: dict[str, Any] | None = None) -> None:
+    """Capture an exception in Sentry with optional extra context."""
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.push_scope() as scope:
+            if context:
+                for key, value in context.items():
+                    scope.set_extra(key, value)
+            sentry_sdk.capture_exception(error)
+    except Exception:
+        logger.exception("Failed to capture exception in Sentry")
+
+
+# ---------------------------------------------------------------------------
+# PostHog initialization
+# ---------------------------------------------------------------------------
+
+
+def init_posthog(api_key: str, host: str) -> None:
+    """Initialize the PostHog Python SDK.
+
+    Call from app lifespan startup. If api_key is empty, PostHog is not
+    initialized and all track/identify calls become no-ops.
+    """
+    global _posthog_client
+
+    if not api_key:
+        logger.info("PostHog API key not configured — skipping PostHog init")
+        return
+
+    from posthog import Posthog
+
+    _posthog_client = Posthog(
+        api_key=api_key,
+        host=host,
+        debug=False,
+        on_error=_posthog_on_error,
+    )
+    logger.info("PostHog initialized (host=%s)", host)
+
+
+def shutdown_posthog() -> None:
+    """Flush and shut down the PostHog client. Call from app lifespan shutdown."""
+    global _posthog_client
+    if _posthog_client is not None:
+        try:
+            _posthog_client.shutdown()
+        except Exception:
+            logger.exception("Error shutting down PostHog")
+        _posthog_client = None
+
+
+def _posthog_on_error(error: Exception, items: list) -> None:
+    """PostHog error callback — log but do not crash."""
+    logger.warning("PostHog error: %s (items=%d)", error, len(items))
+
+
+# ---------------------------------------------------------------------------
+# PostHog event tracking
+# ---------------------------------------------------------------------------
+
+
+def track_event(
+    user_id: str,
+    event_name: str,
+    properties: dict[str, Any] | None = None,
+) -> None:
+    """Track an analytics event in PostHog.
+
+    Handles None user_id and missing PostHog client gracefully. If PostHog is
+    not configured, this is a no-op.
+    """
+    if _posthog_client is None:
+        return
+
+    if not user_id:
+        return
+
+    _posthog_client.capture(
+        distinct_id=str(user_id),
+        event=event_name,
+        properties=properties or {},
+    )
+
+
+def identify_user(user_id: str, traits: dict[str, Any] | None = None) -> None:
+    """Set user properties in PostHog (called on signup or profile update)."""
+    if _posthog_client is None:
+        return
+
+    if not user_id:
+        return
+
+    _posthog_client.identify(
+        distinct_id=str(user_id),
+        properties=traits or {},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Standard event names (constants to avoid typos)
+# ---------------------------------------------------------------------------
+
+
+class Events:
+    BOOK_LOGGED = "book_logged"
+    BOOK_SEARCHED = "book_searched"
+    IMPORT_STARTED = "import_started"
+    IMPORT_COMPLETED = "import_completed"
+    USER_SIGNED_UP = "user_signed_up"
+    USER_FOLLOWED = "user_followed"
+    SHELF_CREATED = "shelf_created"
+    EXPORT_REQUESTED = "export_requested"
+    BOOK_RATED = "book_rated"
+    BOOK_REVIEWED = "book_reviewed"
+    USER_BLOCKED = "user_blocked"
+    USER_DELETED_ACCOUNT = "user_deleted_account"
+```
+
+================================================================================
+FILE: backend/api/middleware/observability.py
+================================================================================
+
+First, create the middleware directory:
+
+```
+backend/api/middleware/__init__.py   (empty file)
+backend/api/middleware/observability.py
+```
+
+```python
+from __future__ import annotations
+
+import time
+
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+
+from backend.services.observability import set_sentry_user, track_event
+
+
+class ObservabilityMiddleware(BaseHTTPMiddleware):
+    """Request-level middleware that:
+    1. Attaches user context to Sentry for authenticated requests.
+    2. Logs request duration.
+    3. Tracks authenticated API requests in PostHog.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        start_time = time.monotonic()
+
+        # Extract user ID from JWT if present (without blocking unauthenticated requests)
+        user_id = self._extract_user_id(request)
+        if user_id:
+            set_sentry_user(user_id)
+
+        response = await call_next(request)
+
+        duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+
+        # Add timing header for debugging
+        response.headers["X-Request-Duration-Ms"] = str(duration_ms)
+
+        # Track authenticated requests in PostHog (skip health checks and docs)
+        if user_id and not self._is_internal_path(request.url.path):
+            track_event(
+                user_id=user_id,
+                event_name="api_request",
+                properties={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": duration_ms,
+                },
+            )
+
+        return response
+
+    @staticmethod
+    def _extract_user_id(request: Request) -> str | None:
+        """Try to extract user_id from the Authorization header without raising.
+
+        This is a lightweight extraction that does not validate the JWT. Full
+        validation is done by the FastAPI dependency. We only need the subject
+        claim for observability tagging.
+        """
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+
+        token = auth_header.removeprefix("Bearer ")
+        try:
+            import base64
+            import json
+
+            # Decode JWT payload (middle segment) without verification
+            parts = token.split(".")
+            if len(parts) != 3:
+                return None
+
+            # Add padding if needed
+            payload_b64 = parts[1]
+            padding = 4 - len(payload_b64) % 4
+            if padding != 4:
+                payload_b64 += "=" * padding
+
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+            return payload.get("sub")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_internal_path(path: str) -> bool:
+        """Return True for paths we do not want to track in PostHog."""
+        skip_prefixes = ("/health", "/api/docs", "/openapi.json")
+        return any(path.startswith(prefix) for prefix in skip_prefixes)
+```
+
+================================================================================
+FILE: backend/api/middleware/__init__.py
+================================================================================
+
+```python
+```
+
+================================================================================
+FILE: backend/api/main.py  (full replacement)
+================================================================================
+
+```python
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+from backend.api.config import get_settings
+from backend.api.middleware.observability import ObservabilityMiddleware
+from backend.services.observability import (
+    init_posthog,
+    init_sentry,
+    shutdown_posthog,
+)
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    settings = get_settings()
+
+    # Initialize observability
+    init_sentry(settings.sentry_dsn, settings.environment)
+    init_posthog(settings.posthog_api_key, settings.posthog_host)
+
+    yield
+
+    # Shutdown
+    shutdown_posthog()
+
+    from backend.api.database import engine
+
+    await engine.dispose()
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+
+    app = FastAPI(
+        title="Shelf API",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/api/docs" if settings.environment != "production" else None,
+        redoc_url=None,
+    )
+
+    # Middleware (order matters: last added = outermost = runs first)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(ObservabilityMiddleware)
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {"code": "INTERNAL_ERROR", "message": "An unexpected error occurred."}
+            },
+        )
+
+    # Register routers
+    from backend.api.routes import auth, books, feed, import_, shelves, user_books, users
+
+    app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+    app.include_router(books.router, prefix="/api/v1/books", tags=["books"])
+    app.include_router(users.router, prefix="/api/v1", tags=["users"])
+    app.include_router(user_books.router, prefix="/api/v1", tags=["user_books"])
+    app.include_router(shelves.router, prefix="/api/v1", tags=["shelves"])
+    app.include_router(feed.router, prefix="/api/v1", tags=["feed"])
+    app.include_router(import_.router, prefix="/api/v1/me/import", tags=["import"])
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    return app
+
+
+app = create_app()
+```
+
+================================================================================
+FILE: backend/api/config.py  (additions)
+================================================================================
+
+Add these two fields to the Settings class after the existing `sentry_dsn` field:
+
+```python
+class Settings(BaseSettings):
+    database_url: str = "postgresql+asyncpg://localhost/shelf"
+    supabase_url: str = ""
+    supabase_service_key: str = ""
+    supabase_jwt_secret: str = ""
+    sentry_dsn: str = ""
+    posthog_api_key: str = ""
+    posthog_host: str = "https://app.posthog.com"
+    cloudflare_r2_endpoint: str = ""
+    cloudflare_r2_access_key: str = ""
+    cloudflare_r2_secret_key: str = ""
+    bookshop_affiliate_id: str = ""
+    environment: str = "development"
+    default_page_limit: int = 20
+    max_page_limit: int = 100
+    max_shelves_free: int = 20
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+```
+
+================================================================================
+FILE: backend/requirements.txt  (additions)
+================================================================================
+
+Add these lines (they may partially exist already):
+
+```
+sentry-sdk[fastapi]>=2.0
+posthog>=3.0
+```
+
+================================================================================
+INTEGRATION POINTS: Where to add track_event() calls in existing services
+================================================================================
+
+These are the specific lines to add inside existing service functions.
+Import at the top of each file:
+
+```python
+from backend.services.observability import Events, track_event
+```
+
+--- backend/services/user_book_service.py :: log_book() ---
+
+After the `await db.flush()` at the end of log_book (after activity creation),
+add:
+
+```python
+    # ... existing code ...
+    await db.flush()
+
+    track_event(
+        user_id=str(user_id),
+        event_name=Events.BOOK_LOGGED,
+        properties={
+            "work_id": str(request.work_id),
+            "status": request.status,
+            "has_review": bool(request.review_text),
+            "rating": float(request.rating) if request.rating else None,
+        },
+    )
+
+    return _to_response(user_book, work)
+```
+
+--- backend/services/book_service.py :: search_books() ---
+
+After building the paginated response, before returning:
+
+```python
+    # ... existing code ...
+
+    next_cursor = encode_cursor(works[-1].created_at, works[-1].id) if has_more else None
+
+    track_event(
+        user_id="system",
+        event_name=Events.BOOK_SEARCHED,
+        properties={
+            "query": query,
+            "result_count": len(items),
+        },
+    )
+
+    return PaginatedResponse(items=items, next_cursor=next_cursor, has_more=has_more)
+```
+
+Note: search_books does not receive user_id currently. To track per-user, pass
+the requesting user ID through from the route handler. For now, use "system"
+as a placeholder distinct_id. Alternatively, modify the function signature:
+
+```python
+async def search_books(
+    db: AsyncSession,
+    query: str,
+    cursor: str | None,
+    limit: int,
+    requesting_user_id: UUID | None = None,
+) -> PaginatedResponse[BookSearchResult]:
+```
+
+And in the route handler (backend/api/routes/books.py):
+
+```python
+    return await book_service.search_books(db, q, cursor, limit, requesting_user_id=current_user.id)
+```
+
+--- backend/services/import_service.py :: start_import() ---
+
+After creating the job, before returning:
+
+```python
+    # ... existing code ...
+    db.add(job)
+    await db.flush()
+
+    track_event(
+        user_id=str(user_id),
+        event_name=Events.IMPORT_STARTED,
+        properties={"source": source},
+    )
+
+    return job
+```
+
+--- backend/services/import_service.py :: process_goodreads_csv() ---
+
+After marking the job complete (status = "completed"):
+
+```python
+            # Mark complete
+            job = await _get_job(db, job_id)
+            job.status = "completed"
+            job.matched = matched
+            job.needs_review = needs_review
+            job.unmatched = unmatched
+            job.progress_percent = 100
+            job.completed_at = datetime.utcnow()
+            await db.commit()
+
+            track_event(
+                user_id=str(user_id),
+                event_name=Events.IMPORT_COMPLETED,
+                properties={
+                    "source": "goodreads",
+                    "total": len(rows),
+                    "matched": matched,
+                    "unmatched": unmatched,
+                },
+            )
+```
+
+Do the same for `process_storygraph_csv()` with `"source": "storygraph"`.
+
+--- backend/api/routes/auth.py :: signup() ---
+
+After successfully creating the user, before returning:
+
+```python
+    # ... existing code ...
+    db.add(user)
+    await db.flush()
+
+    track_event(
+        user_id=str(user.id),
+        event_name=Events.USER_SIGNED_UP,
+        properties={"method": "email"},
+    )
+
+    identify_user(
+        user_id=str(user.id),
+        traits={
+            "username": user.username,
+            "signup_method": "email",
+        },
+    )
+
+    return AuthResponse(...)
+```
+
+For Apple/Google OAuth, add similar tracking with `"method": "apple"` or
+`"method": "google"` inside `_oauth_exchange()` when a new user is created.
+
+--- backend/services/social_service.py :: follow_user() ---
+
+After creating the follow and notification:
+
+```python
+    # ... existing code ...
+    db.add(notification)
+    await db.flush()
+
+    track_event(
+        user_id=str(follower_id),
+        event_name=Events.USER_FOLLOWED,
+        properties={"target_user_id": str(target_id)},
+    )
+```
+
+--- backend/services/shelf_service.py :: (shelf creation function) ---
+
+After creating a new shelf:
+
+```python
+    track_event(
+        user_id=str(user_id),
+        event_name=Events.SHELF_CREATED,
+        properties={"shelf_name": shelf.name, "is_public": shelf.is_public},
+    )
+```
+
+================================================================================
+FILE: backend/tests/test_observability.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backend.services.observability import (
+    Events,
+    capture_exception,
+    identify_user,
+    init_posthog,
+    init_sentry,
+    set_sentry_user,
+    shutdown_posthog,
+    track_event,
+)
+
+
+# ---------------------------------------------------------------------------
+# Sentry tests
+# ---------------------------------------------------------------------------
+
+
+class TestSentryInit:
+    def test_empty_dsn_skips_init(self):
+        """Sentry should not be initialized when DSN is empty."""
+        with patch("backend.services.observability.logger") as mock_logger:
+            init_sentry("", "development")
+            mock_logger.info.assert_called_with(
+                "Sentry DSN not configured — skipping Sentry init"
+            )
+
+    @patch("backend.services.observability.sentry_sdk")
+    def test_valid_dsn_initializes(self, mock_sentry):
+        """Sentry should be initialized with the correct parameters."""
+        # We need to mock the imports inside the function
+        with patch.dict("sys.modules", {
+            "sentry_sdk": mock_sentry,
+            "sentry_sdk.integrations.fastapi": MagicMock(),
+            "sentry_sdk.integrations.sqlalchemy": MagicMock(),
+        }):
+            init_sentry("https://key@sentry.io/123", "production")
+
+
+class TestSentryBeforeSend:
+    def test_filters_4xx_http_exceptions(self):
+        """4xx HTTPExceptions should be filtered out."""
+        from backend.services.observability import _sentry_before_send
+        from fastapi import HTTPException
+
+        exc = HTTPException(status_code=404)
+        result = _sentry_before_send(
+            {"event_id": "test"},
+            {"exc_info": (HTTPException, exc, None)},
+        )
+        assert result is None
+
+    def test_filters_4xx_app_errors(self):
+        """4xx AppErrors should be filtered out."""
+        from backend.services.observability import _sentry_before_send
+        from backend.api.errors import AppError
+
+        exc = AppError(422, "INVALID", "test")
+        result = _sentry_before_send(
+            {"event_id": "test"},
+            {"exc_info": (AppError, exc, None)},
+        )
+        assert result is None
+
+    def test_passes_5xx_errors(self):
+        """5xx errors should pass through to Sentry."""
+        from backend.services.observability import _sentry_before_send
+
+        event = {"event_id": "test"}
+        exc = RuntimeError("server error")
+        result = _sentry_before_send(
+            event,
+            {"exc_info": (RuntimeError, exc, None)},
+        )
+        assert result == event
+
+    def test_passes_events_without_exc_info(self):
+        """Events without exc_info should pass through."""
+        from backend.services.observability import _sentry_before_send
+
+        event = {"event_id": "test"}
+        result = _sentry_before_send(event, {})
+        assert result == event
+
+
+class TestSetSentryUser:
+    @patch("backend.services.observability.sentry_sdk")
+    def test_sets_user_context(self, mock_sentry):
+        with patch.dict("sys.modules", {"sentry_sdk": mock_sentry}):
+            set_sentry_user("user-123", "testuser")
+            mock_sentry.set_user.assert_called_once_with(
+                {"id": "user-123", "username": "testuser"}
+            )
+
+    def test_graceful_when_sentry_not_initialized(self):
+        """Should not raise when Sentry SDK is not installed/initialized."""
+        set_sentry_user("user-123")  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# PostHog tests
+# ---------------------------------------------------------------------------
+
+
+class TestPostHogInit:
+    def test_empty_api_key_skips_init(self):
+        """PostHog should not be initialized when API key is empty."""
+        with patch("backend.services.observability.logger") as mock_logger:
+            init_posthog("", "https://app.posthog.com")
+            mock_logger.info.assert_called_with(
+                "PostHog API key not configured — skipping PostHog init"
+            )
+
+    @patch("backend.services.observability.Posthog", create=True)
+    def test_valid_key_initializes(self, mock_posthog_cls):
+        """PostHog should be initialized with correct parameters."""
+        with patch.dict("sys.modules", {"posthog": MagicMock()}):
+            init_posthog("phc_test_key", "https://app.posthog.com")
+
+
+class TestTrackEvent:
+    def test_no_op_when_client_not_initialized(self):
+        """track_event should be a no-op when PostHog is not initialized."""
+        import backend.services.observability as obs
+
+        obs._posthog_client = None
+        track_event("user-123", "test_event", {"key": "value"})
+
+    def test_no_op_when_user_id_is_none(self):
+        """track_event should skip when user_id is None."""
+        import backend.services.observability as obs
+
+        mock_client = MagicMock()
+        obs._posthog_client = mock_client
+        track_event(None, "test_event")
+        mock_client.capture.assert_not_called()
+        obs._posthog_client = None
+
+    def test_no_op_when_user_id_is_empty(self):
+        """track_event should skip when user_id is empty string."""
+        import backend.services.observability as obs
+
+        mock_client = MagicMock()
+        obs._posthog_client = mock_client
+        track_event("", "test_event")
+        mock_client.capture.assert_not_called()
+        obs._posthog_client = None
+
+    def test_captures_event_when_configured(self):
+        """track_event should call posthog.capture with correct args."""
+        import backend.services.observability as obs
+
+        mock_client = MagicMock()
+        obs._posthog_client = mock_client
+
+        track_event("user-123", "book_logged", {"work_id": "abc", "status": "read"})
+
+        mock_client.capture.assert_called_once_with(
+            distinct_id="user-123",
+            event="book_logged",
+            properties={"work_id": "abc", "status": "read"},
+        )
+        obs._posthog_client = None
+
+    def test_default_empty_properties(self):
+        """Properties default to empty dict when not provided."""
+        import backend.services.observability as obs
+
+        mock_client = MagicMock()
+        obs._posthog_client = mock_client
+
+        track_event("user-123", "test_event")
+
+        mock_client.capture.assert_called_once_with(
+            distinct_id="user-123",
+            event="test_event",
+            properties={},
+        )
+        obs._posthog_client = None
+
+
+class TestIdentifyUser:
+    def test_no_op_when_not_initialized(self):
+        """identify_user should be a no-op when PostHog is not initialized."""
+        import backend.services.observability as obs
+
+        obs._posthog_client = None
+        identify_user("user-123", {"username": "test"})
+
+    def test_identifies_user_when_configured(self):
+        """identify_user should call posthog.identify."""
+        import backend.services.observability as obs
+
+        mock_client = MagicMock()
+        obs._posthog_client = mock_client
+
+        identify_user("user-123", {"username": "test", "signup_method": "email"})
+
+        mock_client.identify.assert_called_once_with(
+            distinct_id="user-123",
+            properties={"username": "test", "signup_method": "email"},
+        )
+        obs._posthog_client = None
+
+
+class TestShutdownPosthog:
+    def test_shutdown_calls_client_shutdown(self):
+        """shutdown_posthog should call client.shutdown()."""
+        import backend.services.observability as obs
+
+        mock_client = MagicMock()
+        obs._posthog_client = mock_client
+
+        shutdown_posthog()
+
+        mock_client.shutdown.assert_called_once()
+        assert obs._posthog_client is None
+
+    def test_shutdown_no_op_when_not_initialized(self):
+        """shutdown_posthog should be safe when client is None."""
+        import backend.services.observability as obs
+
+        obs._posthog_client = None
+        shutdown_posthog()  # Should not raise
+
+
+class TestCaptureException:
+    def test_graceful_when_sentry_not_initialized(self):
+        """capture_exception should not raise when Sentry is not available."""
+        capture_exception(RuntimeError("test"))  # Should not raise
+
+    @patch("backend.services.observability.sentry_sdk")
+    def test_captures_with_context(self, mock_sentry):
+        with patch.dict("sys.modules", {"sentry_sdk": mock_sentry}):
+            capture_exception(
+                RuntimeError("test"),
+                context={"user_id": "123", "action": "import"},
+            )
+
+
+# ---------------------------------------------------------------------------
+# Middleware tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_middleware_adds_duration_header(client):
+    """Middleware should add X-Request-Duration-Ms header to all responses."""
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    assert "x-request-duration-ms" in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_middleware_does_not_break_unauthenticated(client):
+    """Middleware should work correctly for unauthenticated requests."""
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+class TestEventNames:
+    def test_event_constants_are_strings(self):
+        """All event constants should be non-empty strings."""
+        assert Events.BOOK_LOGGED == "book_logged"
+        assert Events.BOOK_SEARCHED == "book_searched"
+        assert Events.IMPORT_STARTED == "import_started"
+        assert Events.IMPORT_COMPLETED == "import_completed"
+        assert Events.USER_SIGNED_UP == "user_signed_up"
+        assert Events.USER_FOLLOWED == "user_followed"
+        assert Events.SHELF_CREATED == "shelf_created"
+        assert Events.EXPORT_REQUESTED == "export_requested"
+```

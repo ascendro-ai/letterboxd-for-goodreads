@@ -19,8 +19,16 @@ class Settings(BaseSettings):
     cloudflare_r2_secret_key: str = ""
     bookshop_affiliate_id: str = ""
     openai_api_key: str = ""
+    perspective_api_key: str = ""
+    dev_auth_bypass: bool = False
     posthog_api_key: str = ""
     posthog_host: str = "https://app.posthog.com"
+    revenuecat_webhook_secret: str = ""
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_bundle_id: str = "com.shelf.app"
+    apns_key_path: str = ""
+    apns_use_sandbox: bool = True
     environment: str = "development"
     default_page_limit: int = 20
     max_page_limit: int = 100  # hard cap to prevent expensive unbounded queries

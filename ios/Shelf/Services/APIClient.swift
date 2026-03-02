@@ -2,7 +2,7 @@
 ///
 /// Automatically attaches the Supabase JWT from AuthService, handles token
 /// refresh on 401 responses, and provides typed JSON decoding. All methods
-/// throw ``APIError`` on failure.
+/// throw ``APIError`` on failure. Supports opportunistic caching for offline use.
 
 import Foundation
 
@@ -34,6 +34,7 @@ enum APIError: LocalizedError {
     case networkError(Error)
     case decodingError(Error)
     case apiError(code: String, message: String)
+    case offline
 
     var errorDescription: String? {
         switch self {
@@ -48,6 +49,7 @@ enum APIError: LocalizedError {
         case .networkError: "No internet connection."
         case .decodingError: "Unexpected response from server."
         case .apiError(_, let message): message
+        case .offline: "You're offline. Changes will sync when you reconnect."
         }
     }
 }
@@ -71,6 +73,9 @@ final class APIClient {
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
     private var environment: APIEnvironment
+
+    /// In-memory response cache for offline fallback on GET requests.
+    private var responseCache: [String: Data] = [:]
 
     var authToken: String?
 
@@ -119,9 +124,26 @@ final class APIClient {
             request.httpBody = try encoder.encode(body)
         }
 
-        let (data, response) = try await perform(request)
-        try validateResponse(response, data: data)
-        return try decoder.decode(T.self, from: data)
+        let cacheKey = "\(method.rawValue):\(url.absoluteString)"
+
+        do {
+            let (data, response) = try await perform(request)
+            try validateResponse(response, data: data)
+
+            // Cache successful GET responses for offline fallback
+            if method == .get {
+                responseCache[cacheKey] = data
+            }
+
+            return try decoder.decode(T.self, from: data)
+        } catch let error as APIError {
+            // On network error for GET requests, try cache fallback
+            if case .networkError = error, method == .get,
+               let cachedData = responseCache[cacheKey] {
+                return try decoder.decode(T.self, from: cachedData)
+            }
+            throw error
+        }
     }
 
     // MARK: - Request without response body

@@ -20,6 +20,7 @@ class LogBookRequest(BaseModel):
     has_spoilers: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    is_private: bool = False
 
     @field_validator("rating")
     @classmethod
@@ -36,6 +37,7 @@ class UpdateBookRequest(BaseModel):
     has_spoilers: bool | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    is_private: bool | None = None
 
     @field_validator("rating")
     @classmethod
@@ -55,6 +57,7 @@ class UserBookResponse(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     is_imported: bool = False
+    is_private: bool = False
     created_at: datetime
     updated_at: datetime
     book: BookBrief | None = None

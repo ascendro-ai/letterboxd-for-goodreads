@@ -1,0 +1,1276 @@
+================================================================================
+18 — Cold Start Feed
+Popular This Week feed for users with no follows, plus onboarding prompts
+================================================================================
+
+When a user has no follows, the feed endpoint returns globally popular
+activities instead of an empty feed. The response includes a feed_type field
+("following", "popular", or "mixed") so the iOS client can display appropriate
+headers and discovery prompt cards.
+
+================================================================================
+BACKEND CHANGES
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/schemas/feed.py  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID
+
+from backend.api.schemas.books import BookBrief
+from backend.api.schemas.users import UserBrief
+from pydantic import BaseModel
+
+__all__ = ["FeedItem", "FeedResponse", "MarkReadRequest", "NotificationItem"]
+
+
+class FeedItem(BaseModel):
+    id: UUID
+    user: UserBrief
+    activity_type: str
+    book: BookBrief
+    rating: Decimal | None = None
+    review_text: str | None = None
+    has_spoilers: bool = False
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FeedResponse(BaseModel):
+    """Feed response with feed type metadata for cold start detection."""
+
+    items: list[FeedItem]
+    next_cursor: str | None = None
+    has_more: bool = False
+    feed_type: str = "following"
+
+    model_config = {"from_attributes": True}
+
+
+class NotificationItem(BaseModel):
+    id: UUID
+    type: str
+    actor: UserBrief | None = None
+    data: dict | None = None
+    is_read: bool = False
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MarkReadRequest(BaseModel):
+    notification_ids: list[UUID]
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/popular_service.py  (new file)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from uuid import UUID
+
+from backend.api.model_stubs import Activity, UserBook, Work
+from backend.api.pagination import apply_cursor_filter, encode_cursor
+from backend.api.schemas.books import AuthorBrief, BookBrief
+from backend.api.schemas.feed import FeedItem, FeedResponse
+from backend.api.schemas.users import UserBrief
+from backend.api.model_stubs import User
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def get_popular_books_this_week(
+    db: AsyncSession,
+    limit: int = 20,
+) -> list[BookBrief]:
+    """Return books with the most 'read' activity in the last 7 days."""
+    one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+
+    stmt = (
+        select(
+            UserBook.work_id,
+            func.count(UserBook.id).label("activity_count"),
+        )
+        .where(
+            UserBook.status == "read",
+            UserBook.created_at > one_week_ago,
+        )
+        .group_by(UserBook.work_id)
+        .order_by(func.count(UserBook.id).desc())
+        .limit(limit)
+    )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return []
+
+    work_ids = [row.work_id for row in rows]
+    works_result = await db.execute(select(Work).where(Work.id.in_(work_ids)))
+    works_map = {w.id: w for w in works_result.scalars().all()}
+
+    # Preserve popularity ordering
+    books: list[BookBrief] = []
+    for row in rows:
+        work = works_map.get(row.work_id)
+        if not work:
+            continue
+        books.append(
+            BookBrief(
+                id=work.id,
+                title=work.title,
+                authors=[AuthorBrief(id=a.id, name=a.name) for a in (work.authors or [])],
+                cover_image_url=work.cover_image_url,
+                average_rating=work.average_rating,
+                ratings_count=work.ratings_count,
+            )
+        )
+
+    return books
+
+
+async def get_trending_books(
+    db: AsyncSession,
+    hours: int = 48,
+    limit: int = 20,
+) -> list[BookBrief]:
+    """Return books with the most activity in the last N hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    stmt = (
+        select(
+            Activity.target_id,
+            func.count(Activity.id).label("activity_count"),
+        )
+        .where(
+            Activity.activity_type == "finished_book",
+            Activity.created_at > cutoff,
+        )
+        .group_by(Activity.target_id)
+        .order_by(func.count(Activity.id).desc())
+        .limit(limit)
+    )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return []
+
+    # target_id on Activity points to UserBook.id
+    ub_ids = [row.target_id for row in rows]
+    ub_result = await db.execute(select(UserBook).where(UserBook.id.in_(ub_ids)))
+    ub_map = {ub.id: ub for ub in ub_result.scalars().all()}
+
+    work_ids = list({ub.work_id for ub in ub_map.values()})
+    works_result = await db.execute(select(Work).where(Work.id.in_(work_ids)))
+    works_map = {w.id: w for w in works_result.scalars().all()}
+
+    # Deduplicate by work_id, preserving trending order
+    seen_work_ids: set = set()
+    books: list[BookBrief] = []
+    for row in rows:
+        ub = ub_map.get(row.target_id)
+        if not ub:
+            continue
+        work = works_map.get(ub.work_id)
+        if not work or work.id in seen_work_ids:
+            continue
+        seen_work_ids.add(work.id)
+        books.append(
+            BookBrief(
+                id=work.id,
+                title=work.title,
+                authors=[AuthorBrief(id=a.id, name=a.name) for a in (work.authors or [])],
+                cover_image_url=work.cover_image_url,
+                average_rating=work.average_rating,
+                ratings_count=work.ratings_count,
+            )
+        )
+
+    return books
+
+
+async def get_popular_feed_items(
+    db: AsyncSession,
+    cursor: str | None,
+    limit: int,
+) -> FeedResponse:
+    """Cold start feed: recent finished_book activities globally, only those with ratings."""
+    stmt = (
+        select(Activity)
+        .where(Activity.activity_type == "finished_book")
+        .order_by(Activity.created_at.desc(), Activity.id.desc())
+    )
+    stmt = apply_cursor_filter(stmt, Activity, cursor)
+    stmt = stmt.limit(limit + 1)
+
+    result = await db.execute(stmt)
+    activities = list(result.scalars().all())
+
+    has_more = len(activities) > limit
+    if has_more:
+        activities = activities[:limit]
+
+    if not activities:
+        return FeedResponse(items=[], next_cursor=None, has_more=False, feed_type="popular")
+
+    # Batch load users, user_books, works
+    user_ids = list({a.user_id for a in activities})
+    target_ids = list({a.target_id for a in activities})
+
+    users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
+    users_map = {u.id: u for u in users_result.scalars().all()}
+
+    ub_result = await db.execute(select(UserBook).where(UserBook.id.in_(target_ids)))
+    ub_map = {ub.id: ub for ub in ub_result.scalars().all()}
+
+    work_ids = list({ub.work_id for ub in ub_map.values()})
+    if work_ids:
+        works_result = await db.execute(select(Work).where(Work.id.in_(work_ids)))
+        works_map = {w.id: w for w in works_result.scalars().all()}
+    else:
+        works_map = {}
+
+    items: list[FeedItem] = []
+    for activity in activities:
+        user = users_map.get(activity.user_id)
+        user_book = ub_map.get(activity.target_id)
+        work = works_map.get(user_book.work_id) if user_book else None
+
+        if not user or not user_book or not work:
+            continue
+
+        # Only include activities with ratings for the popular feed (higher signal)
+        if user_book.rating is None:
+            continue
+
+        items.append(
+            FeedItem(
+                id=activity.id,
+                user=UserBrief(
+                    id=user.id,
+                    username=user.username,
+                    display_name=user.display_name,
+                    avatar_url=user.avatar_url,
+                ),
+                activity_type=activity.activity_type,
+                book=BookBrief(
+                    id=work.id,
+                    title=work.title,
+                    authors=[AuthorBrief(id=a.id, name=a.name) for a in (work.authors or [])],
+                    cover_image_url=work.cover_image_url,
+                    average_rating=work.average_rating,
+                    ratings_count=work.ratings_count,
+                ),
+                rating=user_book.rating,
+                review_text=user_book.review_text,
+                has_spoilers=user_book.has_spoilers,
+                created_at=activity.created_at,
+            )
+        )
+
+    next_cursor = (
+        encode_cursor(activities[-1].created_at, activities[-1].id) if has_more else None
+    )
+
+    return FeedResponse(
+        items=items,
+        next_cursor=next_cursor,
+        has_more=has_more,
+        feed_type="popular",
+    )
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/feed_service.py  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from backend.api.model_stubs import (
+    Activity,
+    Block,
+    Follow,
+    Mute,
+    Notification,
+    User,
+    UserBook,
+    Work,
+)
+from backend.api.pagination import apply_cursor_filter, encode_cursor
+from backend.api.schemas.books import AuthorBrief, BookBrief
+from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.feed import FeedItem, FeedResponse, NotificationItem
+from backend.api.schemas.users import UserBrief
+from backend.services.popular_service import get_popular_feed_items
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def get_feed(
+    db: AsyncSession,
+    user_id: UUID,
+    cursor: str | None,
+    limit: int,
+) -> FeedResponse:
+    """Get activity feed. Falls back to popular feed if user has no follows."""
+    # Check if user has any follows
+    follow_count = await db.scalar(select(func.count()).where(Follow.follower_id == user_id))
+
+    if not follow_count:
+        return await get_popular_feed_items(db, cursor, limit)
+
+    following_feed = await _get_following_feed(db, user_id, cursor, limit)
+
+    # If the user follows people but the feed is empty (e.g. new follows, no
+    # activity yet), mix in popular items
+    if not following_feed.items and cursor is None:
+        popular = await get_popular_feed_items(db, cursor, limit)
+        return FeedResponse(
+            items=popular.items,
+            next_cursor=popular.next_cursor,
+            has_more=popular.has_more,
+            feed_type="mixed",
+        )
+
+    return following_feed
+
+
+async def _get_following_feed(
+    db: AsyncSession,
+    user_id: UUID,
+    cursor: str | None,
+    limit: int,
+) -> FeedResponse:
+    """Fan-out-on-read: activities from followed users, excluding muted/blocked."""
+    following_ids = select(Follow.following_id).where(Follow.follower_id == user_id)
+    blocked_ids = select(Block.blocked_id).where(Block.blocker_id == user_id)
+    blocked_by_ids = select(Block.blocker_id).where(Block.blocked_id == user_id)
+    muted_ids = select(Mute.muted_id).where(Mute.muter_id == user_id)
+
+    stmt = (
+        select(Activity)
+        .where(
+            Activity.user_id.in_(following_ids),
+            Activity.user_id.notin_(blocked_ids),
+            Activity.user_id.notin_(blocked_by_ids),
+            Activity.user_id.notin_(muted_ids),
+            Activity.activity_type.in_(["finished_book", "started_book"]),
+        )
+        .order_by(Activity.created_at.desc(), Activity.id.desc())
+    )
+    stmt = apply_cursor_filter(stmt, Activity, cursor)
+    stmt = stmt.limit(limit + 1)
+
+    result = await db.execute(stmt)
+    activities = list(result.scalars().all())
+
+    has_more = len(activities) > limit
+    if has_more:
+        activities = activities[:limit]
+
+    feed = await _activities_to_feed(db, activities, has_more)
+    return FeedResponse(
+        items=feed.items,
+        next_cursor=feed.next_cursor,
+        has_more=feed.has_more,
+        feed_type="following",
+    )
+
+
+async def _activities_to_feed(
+    db: AsyncSession,
+    activities: list[Activity],
+    has_more: bool,
+) -> PaginatedResponse[FeedItem]:
+    """Convert Activity objects to FeedItem responses with related data."""
+    if not activities:
+        return PaginatedResponse(items=[], next_cursor=None, has_more=False)
+
+    # Batch load users, user_books, works
+    user_ids = list({a.user_id for a in activities})
+    target_ids = list({a.target_id for a in activities})
+
+    users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
+    users_map = {u.id: u for u in users_result.scalars().all()}
+
+    ub_result = await db.execute(select(UserBook).where(UserBook.id.in_(target_ids)))
+    ub_map = {ub.id: ub for ub in ub_result.scalars().all()}
+
+    work_ids = list({ub.work_id for ub in ub_map.values()})
+    if work_ids:
+        works_result = await db.execute(select(Work).where(Work.id.in_(work_ids)))
+        works_map = {w.id: w for w in works_result.scalars().all()}
+    else:
+        works_map = {}
+
+    items = []
+    for activity in activities:
+        user = users_map.get(activity.user_id)
+        user_book = ub_map.get(activity.target_id)
+        work = works_map.get(user_book.work_id) if user_book else None
+
+        if not user or not user_book or not work:
+            continue
+
+        items.append(
+            FeedItem(
+                id=activity.id,
+                user=UserBrief(
+                    id=user.id,
+                    username=user.username,
+                    display_name=user.display_name,
+                    avatar_url=user.avatar_url,
+                ),
+                activity_type=activity.activity_type,
+                book=BookBrief(
+                    id=work.id,
+                    title=work.title,
+                    authors=[AuthorBrief(id=a.id, name=a.name) for a in (work.authors or [])],
+                    cover_image_url=work.cover_image_url,
+                    average_rating=work.average_rating,
+                    ratings_count=work.ratings_count,
+                ),
+                rating=user_book.rating,
+                review_text=user_book.review_text,
+                has_spoilers=user_book.has_spoilers,
+                created_at=activity.created_at,
+            )
+        )
+
+    next_cursor = encode_cursor(activities[-1].created_at, activities[-1].id) if has_more else None
+
+    return PaginatedResponse(items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+async def get_notifications(
+    db: AsyncSession,
+    user_id: UUID,
+    cursor: str | None,
+    limit: int,
+) -> PaginatedResponse[NotificationItem]:
+    """Get user's notifications (paginated)."""
+    stmt = (
+        select(Notification)
+        .where(Notification.user_id == user_id)
+        .order_by(Notification.created_at.desc(), Notification.id.desc())
+    )
+    stmt = apply_cursor_filter(stmt, Notification, cursor)
+    stmt = stmt.limit(limit + 1)
+
+    result = await db.execute(stmt)
+    notifications = list(result.scalars().all())
+
+    has_more = len(notifications) > limit
+    if has_more:
+        notifications = notifications[:limit]
+
+    # Load actors
+    actor_ids = list({n.actor_id for n in notifications if n.actor_id})
+    if actor_ids:
+        actors_result = await db.execute(select(User).where(User.id.in_(actor_ids)))
+        actors_map = {u.id: u for u in actors_result.scalars().all()}
+    else:
+        actors_map = {}
+
+    items = []
+    for n in notifications:
+        actor = actors_map.get(n.actor_id) if n.actor_id else None
+        items.append(
+            NotificationItem(
+                id=n.id,
+                type=n.type,
+                actor=UserBrief(
+                    id=actor.id,
+                    username=actor.username,
+                    display_name=actor.display_name,
+                    avatar_url=actor.avatar_url,
+                )
+                if actor
+                else None,
+                data=n.data,
+                is_read=n.is_read,
+                created_at=n.created_at,
+            )
+        )
+
+    next_cursor = (
+        encode_cursor(notifications[-1].created_at, notifications[-1].id) if has_more else None
+    )
+
+    return PaginatedResponse(items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+async def mark_notifications_read(
+    db: AsyncSession, user_id: UUID, notification_ids: list[UUID]
+) -> None:
+    """Bulk mark notifications as read."""
+    await db.execute(
+        update(Notification)
+        .where(
+            Notification.id.in_(notification_ids),
+            Notification.user_id == user_id,
+        )
+        .values(is_read=True)
+    )
+    await db.flush()
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/feed.py  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from backend.api.deps import DB, CurrentUser
+from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.feed import FeedResponse, MarkReadRequest, NotificationItem
+from backend.services import feed_service
+from fastapi import APIRouter, Query
+
+router = APIRouter()
+
+
+@router.get("/feed", response_model=FeedResponse)
+async def get_feed(
+    db: DB,
+    current_user: CurrentUser,
+    cursor: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+) -> FeedResponse:
+    """Get activity feed. Returns popular feed for users with no follows (cold start)."""
+    return await feed_service.get_feed(db, current_user.id, cursor, limit)
+
+
+@router.get("/notifications", response_model=PaginatedResponse[NotificationItem])
+async def get_notifications(
+    db: DB,
+    current_user: CurrentUser,
+    cursor: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+) -> PaginatedResponse[NotificationItem]:
+    """Get your notifications (paginated)."""
+    return await feed_service.get_notifications(db, current_user.id, cursor, limit)
+
+
+@router.post("/notifications/read")
+async def mark_notifications_read(
+    request: MarkReadRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Mark notifications as read."""
+    await feed_service.mark_notifications_read(db, current_user.id, request.notification_ids)
+    return {"message": "Notifications marked as read"}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/books.py  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+Update the popular books endpoint import and handler. Replace the existing
+get popular_books endpoint with:
+
+from backend.services.popular_service import get_popular_books_this_week
+
+@router.get("/popular", response_model=list[BookBrief])
+async def popular_books(
+    db: DB,
+    current_user: CurrentUser,
+    limit: int = Query(20, ge=1, le=50),
+) -> list[BookBrief]:
+    """Get popular books this week (by recent reading activity)."""
+    return await get_popular_books_this_week(db, limit=limit)
+
+The full updated imports section for books.py:
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from backend.api.deps import DB, CurrentUser
+from backend.api.schemas.books import BookBrief, BookDetail, BookSearchResult
+from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.user_books import UserBookResponse
+from backend.services import book_service
+from backend.services.popular_service import get_popular_books_this_week
+from fastapi import APIRouter, Query
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_cold_start.py  (new file)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+import pytest
+from backend.api.model_stubs import Activity, Follow, UserBook, Work
+
+
+@pytest.mark.asyncio
+async def test_user_no_follows_gets_popular_feed(client):
+    """User with 0 follows gets feed_type = 'popular'."""
+    resp = await client.get("/api/v1/feed")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["feed_type"] == "popular"
+
+
+@pytest.mark.asyncio
+async def test_user_with_follows_gets_following_feed(
+    client, db_session, test_user_id, other_user
+):
+    """User with follows gets feed_type = 'following'."""
+    follow = Follow(follower_id=str(test_user_id), following_id=str(other_user.id))
+    db_session.add(follow)
+
+    work = Work(id=str(uuid.uuid4()), title="Followed Book", ratings_count=0)
+    db_session.add(work)
+    await db_session.flush()
+
+    user_book = UserBook(
+        id=str(uuid.uuid4()),
+        user_id=str(other_user.id),
+        work_id=str(work.id),
+        status="read",
+        rating=Decimal("4.0"),
+        is_imported=False,
+        has_spoilers=False,
+    )
+    db_session.add(user_book)
+    await db_session.flush()
+
+    activity = Activity(
+        id=str(uuid.uuid4()),
+        user_id=str(other_user.id),
+        activity_type="finished_book",
+        target_id=str(user_book.id),
+    )
+    db_session.add(activity)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/feed")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["feed_type"] == "following"
+    assert len(data["items"]) == 1
+    assert data["items"][0]["book"]["title"] == "Followed Book"
+
+
+@pytest.mark.asyncio
+async def test_user_with_follows_but_empty_feed_gets_mixed(
+    client, db_session, test_user_id, other_user
+):
+    """User with follows but no followed-user activity gets feed_type = 'mixed'."""
+    # Follow other_user but other_user has no activities
+    follow = Follow(follower_id=str(test_user_id), following_id=str(other_user.id))
+    db_session.add(follow)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/feed")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["feed_type"] == "mixed"
+
+
+@pytest.mark.asyncio
+async def test_popular_feed_returns_rated_activities(client, db_session, other_user):
+    """Popular feed only includes activities with ratings."""
+    work = Work(id=str(uuid.uuid4()), title="Rated Book", ratings_count=5)
+    db_session.add(work)
+    await db_session.flush()
+
+    # User book WITH a rating
+    ub_rated = UserBook(
+        id=str(uuid.uuid4()),
+        user_id=str(other_user.id),
+        work_id=str(work.id),
+        status="read",
+        rating=Decimal("4.5"),
+        is_imported=False,
+        has_spoilers=False,
+    )
+    db_session.add(ub_rated)
+    await db_session.flush()
+
+    activity_rated = Activity(
+        id=str(uuid.uuid4()),
+        user_id=str(other_user.id),
+        activity_type="finished_book",
+        target_id=str(ub_rated.id),
+    )
+    db_session.add(activity_rated)
+
+    # User book WITHOUT a rating (should be filtered out of popular feed)
+    work2 = Work(id=str(uuid.uuid4()), title="Unrated Book", ratings_count=0)
+    db_session.add(work2)
+    await db_session.flush()
+
+    ub_unrated = UserBook(
+        id=str(uuid.uuid4()),
+        user_id=str(other_user.id),
+        work_id=str(work2.id),
+        status="read",
+        rating=None,
+        is_imported=False,
+        has_spoilers=False,
+    )
+    db_session.add(ub_unrated)
+    await db_session.flush()
+
+    activity_unrated = Activity(
+        id=str(uuid.uuid4()),
+        user_id=str(other_user.id),
+        activity_type="finished_book",
+        target_id=str(ub_unrated.id),
+    )
+    db_session.add(activity_unrated)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/feed")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["feed_type"] == "popular"
+
+    titles = [item["book"]["title"] for item in data["items"]]
+    assert "Rated Book" in titles
+    assert "Unrated Book" not in titles
+
+
+@pytest.mark.asyncio
+async def test_popular_feed_pagination(client, db_session, other_user):
+    """Popular feed supports cursor pagination."""
+    work = Work(id=str(uuid.uuid4()), title="Paginated Book", ratings_count=10)
+    db_session.add(work)
+    await db_session.flush()
+
+    # Create 3 activities
+    for i in range(3):
+        ub = UserBook(
+            id=str(uuid.uuid4()),
+            user_id=str(other_user.id),
+            work_id=str(work.id),
+            status="read",
+            rating=Decimal("3.0"),
+            is_imported=False,
+            has_spoilers=False,
+        )
+        db_session.add(ub)
+        await db_session.flush()
+
+        activity = Activity(
+            id=str(uuid.uuid4()),
+            user_id=str(other_user.id),
+            activity_type="finished_book",
+            target_id=str(ub.id),
+        )
+        db_session.add(activity)
+
+    await db_session.commit()
+
+    # First page with limit=2
+    resp = await client.get("/api/v1/feed", params={"limit": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["feed_type"] == "popular"
+    assert data["has_more"] is True
+    assert data["next_cursor"] is not None
+
+    # Second page
+    resp2 = await client.get(
+        "/api/v1/feed",
+        params={"limit": 2, "cursor": data["next_cursor"]},
+    )
+    assert resp2.status_code == 200
+    data2 = resp2.json()
+    assert data2["feed_type"] == "popular"
+    assert len(data2["items"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_feed_response_has_feed_type_field(client):
+    """Verify feed_type is always present in response."""
+    resp = await client.get("/api/v1/feed")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "feed_type" in data
+    assert data["feed_type"] in ("following", "popular", "mixed")
+
+
+================================================================================
+iOS CHANGES
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Models/Feed.swift  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+// MARK: - Feed Type
+
+enum FeedType: String, Codable {
+    case following
+    case popular
+    case mixed
+}
+
+// MARK: - Activity Type
+
+enum ActivityType: String, Codable {
+    case finishedBook = "finished_book"
+    case startedBook = "started_book"
+
+    var displayText: String {
+        switch self {
+        case .finishedBook: "finished reading"
+        case .startedBook: "started reading"
+        }
+    }
+}
+
+// MARK: - Feed Response
+
+struct FeedResponse: Codable {
+    let items: [FeedItem]
+    let nextCursor: String?
+    let hasMore: Bool
+    let feedType: FeedType
+
+    enum CodingKeys: String, CodingKey {
+        case items
+        case nextCursor = "next_cursor"
+        case hasMore = "has_more"
+        case feedType = "feed_type"
+    }
+}
+
+// MARK: - Feed Item
+
+struct FeedItem: Codable, Identifiable, Hashable {
+    let id: UUID
+    let user: User
+    let activityType: ActivityType
+    let book: Book
+    let rating: Double?
+    let reviewText: String?
+    let hasSpoilers: Bool
+    let createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, user, book, rating
+        case activityType = "activity_type"
+        case reviewText = "review_text"
+        case hasSpoilers = "has_spoilers"
+        case createdAt = "created_at"
+    }
+}
+
+// MARK: - Notification
+
+struct AppNotification: Codable, Identifiable, Hashable {
+    let id: UUID
+    let type: String
+    let title: String
+    let body: String
+    let isRead: Bool
+    let metadata: NotificationMetadata?
+    let createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, title, body, metadata
+        case isRead = "is_read"
+        case createdAt = "created_at"
+    }
+}
+
+struct NotificationMetadata: Codable, Hashable {
+    let userID: UUID?
+    let bookID: UUID?
+    let username: String?
+    let bookTitle: String?
+
+    enum CodingKeys: String, CodingKey {
+        case username
+        case userID = "user_id"
+        case bookID = "book_id"
+        case bookTitle = "book_title"
+    }
+}
+
+// MARK: - Taste Match
+
+struct TasteMatch: Codable, Identifiable, Hashable {
+    var id: UUID { user.id }
+    let user: User
+    let matchScore: Double
+    let overlappingBooksCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case user
+        case matchScore = "match_score"
+        case overlappingBooksCount = "overlapping_books_count"
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/FeedService.swift  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+@Observable
+final class FeedService {
+    static let shared = FeedService()
+    private let api = APIClient.shared
+
+    private init() {}
+
+    // MARK: - Feed
+
+    func getFeed(cursor: String? = nil, limit: Int = 20) async throws -> FeedResponse {
+        var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor { queryItems.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await api.request(.get, path: "/feed", queryItems: queryItems)
+    }
+
+    // MARK: - Notifications
+
+    func getNotifications(cursor: String? = nil) async throws -> PaginatedResponse<AppNotification> {
+        var queryItems: [URLQueryItem] = []
+        if let cursor { queryItems.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await api.request(.get, path: "/notifications", queryItems: queryItems)
+    }
+
+    func markNotificationsRead(ids: [UUID]) async throws {
+        let body = ["ids": ids]
+        try await api.request(.post, path: "/notifications/read", body: body)
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/ViewModels/FeedViewModel.swift  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+@Observable
+final class FeedViewModel {
+    private(set) var items: [FeedItem] = []
+    private(set) var isLoading = false
+    private(set) var isLoadingMore = false
+    private(set) var error: Error?
+    private(set) var feedType: FeedType = .following
+    private var nextCursor: String?
+    private var hasMore = true
+
+    private let feedService = FeedService.shared
+
+    var isPopularFeed: Bool { feedType == .popular }
+    var isMixedFeed: Bool { feedType == .mixed }
+
+    @MainActor
+    func loadFeed() async {
+        guard !isLoading else { return }
+        isLoading = true
+        error = nil
+
+        do {
+            let response = try await feedService.getFeed()
+            items = response.items
+            nextCursor = response.nextCursor
+            hasMore = response.hasMore
+            feedType = response.feedType
+        } catch {
+            self.error = error
+        }
+
+        isLoading = false
+    }
+
+    @MainActor
+    func loadMore() async {
+        guard !isLoadingMore, hasMore, let cursor = nextCursor else { return }
+        isLoadingMore = true
+
+        do {
+            let response = try await feedService.getFeed(cursor: cursor)
+            items.append(contentsOf: response.items)
+            nextCursor = response.nextCursor
+            hasMore = response.hasMore
+        } catch {
+            // Silently fail for pagination
+        }
+
+        isLoadingMore = false
+    }
+
+    @MainActor
+    func refresh() async {
+        nextCursor = nil
+        hasMore = true
+        await loadFeed()
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Components/DiscoverPromptCard.swift  (new file)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+
+struct DiscoverPromptCard: View {
+    let onFindPeople: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "person.2.wave.2")
+                .font(.system(size: 36))
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
+
+            VStack(spacing: 6) {
+                Text("Build Your Feed")
+                    .font(.headline)
+
+                Text("Follow readers with similar taste to see what they're reading")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button {
+                onFindPeople()
+            } label: {
+                Text("Find People")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background(Color.accentColor)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+
+            Button {
+                onDismiss()
+            } label: {
+                Text("Not Now")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Build your feed. Follow readers with similar taste to see what they're reading.")
+        .accessibilityHint("Activate to find people to follow")
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Feed/FeedView.swift  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+
+struct FeedView: View {
+    @State private var viewModel = FeedViewModel()
+    @State private var showFindFriends = false
+    @State private var isDiscoverPromptDismissed = false
+    private let adService = AdService.shared
+
+    private var shouldShowDiscoverPrompt: Bool {
+        guard !isDiscoverPromptDismissed else { return false }
+
+        // Re-show after 7 days if previously dismissed
+        if let dismissedDate = UserDefaults.standard.object(forKey: "discoverPromptDismissedAt") as? Date {
+            let daysSinceDismissal = Calendar.current.dateComponents([.day], from: dismissedDate, to: Date()).day ?? 0
+            if daysSinceDismissal < 7 {
+                return false
+            }
+        }
+
+        return viewModel.isPopularFeed || viewModel.isMixedFeed
+    }
+
+    var body: some View {
+        Group {
+            if viewModel.isLoading && viewModel.items.isEmpty {
+                LoadingStateView()
+            } else if let error = viewModel.error, viewModel.items.isEmpty {
+                ErrorStateView(error: error) {
+                    Task { await viewModel.refresh() }
+                }
+            } else if viewModel.items.isEmpty && !viewModel.isPopularFeed {
+                EmptyStateView(
+                    icon: "newspaper",
+                    title: "Your feed is empty",
+                    message: "Follow readers to see what they're reading. Or search for books to get started."
+                )
+            } else {
+                feedList
+            }
+        }
+        .navigationTitle(feedTitle)
+        .task {
+            if viewModel.items.isEmpty {
+                await viewModel.loadFeed()
+            }
+        }
+        .refreshable {
+            await viewModel.refresh()
+        }
+        .sheet(isPresented: $showFindFriends) {
+            NavigationStack {
+                FindFriendsView()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showFindFriends = false }
+                        }
+                    }
+            }
+        }
+    }
+
+    private var feedTitle: String {
+        switch viewModel.feedType {
+        case .popular:
+            "Discover"
+        case .mixed:
+            "Feed"
+        case .following:
+            "Feed"
+        }
+    }
+
+    private var feedList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                // Feed type header for popular/mixed feeds
+                if viewModel.isPopularFeed {
+                    feedTypeHeader(
+                        title: "Popular This Week",
+                        subtitle: "See what readers are enjoying right now"
+                    )
+                }
+
+                // Discover prompt card at the top for cold start
+                if shouldShowDiscoverPrompt {
+                    DiscoverPromptCard(
+                        onFindPeople: {
+                            showFindFriends = true
+                        },
+                        onDismiss: {
+                            isDiscoverPromptDismissed = true
+                            UserDefaults.standard.set(Date(), forKey: "discoverPromptDismissedAt")
+                        }
+                    )
+                    .padding(.vertical, 8)
+
+                    Divider()
+                        .padding(.horizontal)
+                }
+
+                ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { index, item in
+                    NavigationLink(value: item.book) {
+                        FeedItemView(item: item)
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider()
+                        .padding(.horizontal)
+
+                    // Insert "Discover more readers" card at position 5 for mixed feeds
+                    if viewModel.isMixedFeed && index == 4 && shouldShowDiscoverPrompt {
+                        DiscoverPromptCard(
+                            onFindPeople: {
+                                showFindFriends = true
+                            },
+                            onDismiss: {
+                                isDiscoverPromptDismissed = true
+                                UserDefaults.standard.set(Date(), forKey: "discoverPromptDismissedAt")
+                            }
+                        )
+                        .padding(.vertical, 8)
+
+                        Divider()
+                            .padding(.horizontal)
+                    }
+
+                    // Insert native ad card every N items
+                    if adService.shouldInsertAd(at: index) {
+                        NativeAdCardView()
+                        Divider()
+                            .padding(.horizontal)
+                    }
+
+                    // Load more when nearing end
+                    if index == viewModel.items.count - 3 {
+                        Color.clear
+                            .frame(height: 1)
+                            .task {
+                                await viewModel.loadMore()
+                            }
+                    }
+                }
+
+                if viewModel.isLoadingMore {
+                    ProgressView()
+                        .padding()
+                }
+            }
+        }
+        .navigationDestination(for: Book.self) { book in
+            BookDetailView(bookID: book.id)
+        }
+    }
+
+    private func feedTypeHeader(title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.title3.bold())
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal)
+        .padding(.vertical, 12)
+    }
+}
+
+// MARK: - FindFriendsView stub
+
+/// If FindFriendsView from plan 06 is not yet merged, use this stub.
+/// Delete this when the real FindFriendsView is available.
+struct FindFriendsView: View {
+    var body: some View {
+        Text("Find Friends")
+            .navigationTitle("Find Friends")
+    }
+}

@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var showPaywall = false
     @State private var showExportAlert = false
     @State private var isExporting = false
+    @State private var hideReadingStats = false
 
     private let subscriptionService = SubscriptionService.shared
 
@@ -71,6 +72,13 @@ struct SettingsView: View {
             }
 
             Section("Preferences") {
+                Toggle(isOn: $hideReadingStats) {
+                    Label("Hide Reading Stats", systemImage: "eye.slash")
+                }
+                .onChange(of: hideReadingStats) { _, newValue in
+                    Task { await updateHideStats(newValue) }
+                }
+
                 NavigationLink {
                     Text("Notification settings")
                         .navigationTitle("Notifications")
@@ -123,6 +131,18 @@ struct SettingsView: View {
         } message: {
             Text("Your data has been prepared. Check your Files app for the export.")
         }
+    }
+
+    private func updateHideStats(_ hide: Bool) async {
+        struct UpdateProfile: Codable {
+            let hideReadingStats: Bool
+            enum CodingKeys: String, CodingKey {
+                case hideReadingStats = "hide_reading_stats"
+            }
+        }
+        _ = try? await APIClient.shared.request(
+            .patch, path: "/me/profile", body: UpdateProfile(hideReadingStats: hide)
+        ) as UserProfile
     }
 
     private func exportData() {

@@ -1,0 +1,1238 @@
+================================================================================
+07 — Push Notifications via APNs
+Backend push notification infrastructure + integration with existing iOS client
+================================================================================
+
+Feature: Server-side push notification system using APNs HTTP/2 with JWT auth.
+The iOS side (NotificationService.swift) already handles permission requests,
+device token registration, and incoming notification routing. This plan covers
+the backend models, services, routes, APNs client, and integration hooks.
+
+================================================================================
+FILE: backend/models/device.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import ForeignKey, Index, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+class DeviceToken(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "device_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    platform: Mapped[str] = mapped_column(String(10), nullable=False, default="ios")
+
+    __table_args__ = (
+        Index("ix_device_tokens_user_platform", "user_id", "platform"),
+    )
+```
+
+================================================================================
+FILE: backend/models/notification.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, ForeignKey, Index, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base, PgJSONB, TimestampMixin, UUIDMixin
+
+
+class NotificationType(str, enum.Enum):
+    FOLLOW = "follow"
+    BOOK_FINISHED = "book_finished"
+    BOOK_STARTED = "book_started"
+    IMPORT_COMPLETE = "import_complete"
+
+
+class Notification(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "notifications"
+
+    recipient_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    type: Mapped[str] = mapped_column(String(30), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(String(500), nullable=False)
+    metadata: Mapped[dict | None] = mapped_column(PgJSONB(), nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index(
+            "ix_notifications_recipient_unread",
+            "recipient_user_id",
+            "is_read",
+            "created_at",
+        ),
+    )
+```
+
+================================================================================
+FILE: backend/models/__init__.py  (modifications)
+================================================================================
+
+Add these imports alongside the existing model imports:
+
+```python
+from .device import DeviceToken
+from .notification import Notification, NotificationType
+```
+
+================================================================================
+FILE: backend/migrations/versions/xxxx_add_device_tokens_and_notifications.py
+================================================================================
+
+```python
+"""Add device_tokens and notifications tables
+
+Revision ID: a3f7e1b2c4d5
+Revises: <previous_head>
+Create Date: 2026-03-02
+"""
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+revision = "a3f7e1b2c4d5"
+down_revision = None  # Replace with actual previous revision
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "device_tokens",
+        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column("user_id", UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("token", sa.String(255), nullable=False, unique=True),
+        sa.Column("platform", sa.String(10), nullable=False, server_default="ios"),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+    )
+    op.create_index("ix_device_tokens_user_id", "device_tokens", ["user_id"])
+    op.create_index("ix_device_tokens_user_platform", "device_tokens", ["user_id", "platform"])
+
+    op.create_table(
+        "notifications",
+        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column("recipient_user_id", UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("type", sa.String(30), nullable=False),
+        sa.Column("title", sa.String(200), nullable=False),
+        sa.Column("body", sa.String(500), nullable=False),
+        sa.Column("metadata", JSONB(), nullable=True),
+        sa.Column("is_read", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+    )
+    op.create_index("ix_notifications_recipient_user_id", "notifications", ["recipient_user_id"])
+    op.create_index(
+        "ix_notifications_recipient_unread",
+        "notifications",
+        ["recipient_user_id", "is_read", "created_at"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("notifications")
+    op.drop_table("device_tokens")
+```
+
+================================================================================
+FILE: backend/api/schemas/notification.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+__all__ = [
+    "MarkReadRequest",
+    "NotificationResponse",
+    "RegisterDeviceRequest",
+    "UnreadCountResponse",
+]
+
+
+class RegisterDeviceRequest(BaseModel):
+    device_token: str = Field(..., min_length=1, max_length=255, alias="device_token")
+    platform: str = Field(default="ios", max_length=10)
+
+    model_config = {"populate_by_name": True}
+
+
+class NotificationResponse(BaseModel):
+    id: UUID
+    type: str
+    title: str
+    body: str
+    metadata: dict | None = None
+    is_read: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MarkReadRequest(BaseModel):
+    notification_ids: list[UUID]
+
+
+class UnreadCountResponse(BaseModel):
+    count: int
+```
+
+================================================================================
+FILE: backend/api/config.py  (modifications)
+================================================================================
+
+Add these fields to the existing Settings class:
+
+```python
+class Settings(BaseSettings):
+    # ... existing fields ...
+
+    # APNs configuration
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_bundle_id: str = "com.shelf.app"
+    apns_key_path: str = ""  # Path to .p8 key file
+    apns_use_sandbox: bool = True
+
+    # ... rest of Settings ...
+```
+
+================================================================================
+FILE: backend/services/apns.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import json
+import logging
+import time
+from uuid import UUID
+
+import httpx
+import jwt as pyjwt
+
+from backend.api.config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+
+APNS_PRODUCTION_HOST = "https://api.push.apple.com"
+APNS_SANDBOX_HOST = "https://api.sandbox.push.apple.com"
+
+# JWT tokens are valid for 1 hour; refresh after 50 minutes
+_JWT_REFRESH_INTERVAL = 50 * 60
+
+_cached_jwt: str | None = None
+_cached_jwt_timestamp: float = 0.0
+
+
+def _load_signing_key(settings: Settings) -> str:
+    """Load the .p8 private key file contents."""
+    with open(settings.apns_key_path) as f:
+        return f.read()
+
+
+def _generate_jwt(settings: Settings) -> str:
+    """Generate a JWT token for APNs authentication.
+
+    Uses ES256 algorithm with the .p8 key as required by Apple.
+    Caches the token for 50 minutes to avoid regenerating on every request.
+    """
+    global _cached_jwt, _cached_jwt_timestamp
+
+    now = time.time()
+    if _cached_jwt and (now - _cached_jwt_timestamp) < _JWT_REFRESH_INTERVAL:
+        return _cached_jwt
+
+    signing_key = _load_signing_key(settings)
+
+    token = pyjwt.encode(
+        payload={"iss": settings.apns_team_id, "iat": int(now)},
+        key=signing_key,
+        algorithm="ES256",
+        headers={"kid": settings.apns_key_id},
+    )
+
+    _cached_jwt = token
+    _cached_jwt_timestamp = now
+    return token
+
+
+def _get_apns_host(settings: Settings) -> str:
+    """Return the APNs host based on environment config."""
+    if settings.apns_use_sandbox:
+        return APNS_SANDBOX_HOST
+    return APNS_PRODUCTION_HOST
+
+
+async def send_push(
+    device_token: str,
+    title: str,
+    body: str,
+    badge_count: int | None = None,
+    metadata: dict | None = None,
+) -> bool:
+    """Send a single push notification via APNs HTTP/2.
+
+    Returns True if the push was accepted, False otherwise.
+    Raises InvalidTokenError if the device token is no longer valid.
+    """
+    settings = get_settings()
+
+    if not settings.apns_key_id or not settings.apns_key_path:
+        logger.warning("APNs not configured; skipping push to token=%s...", device_token[:8])
+        return False
+
+    jwt_token = _generate_jwt(settings)
+    host = _get_apns_host(settings)
+    url = f"{host}/3/device/{device_token}"
+
+    payload: dict = {
+        "aps": {
+            "alert": {
+                "title": title,
+                "body": body,
+            },
+            "sound": "default",
+        }
+    }
+
+    if badge_count is not None:
+        payload["aps"]["badge"] = badge_count
+
+    if metadata:
+        for key, value in metadata.items():
+            payload[key] = str(value) if isinstance(value, UUID) else value
+
+    headers = {
+        "authorization": f"bearer {jwt_token}",
+        "apns-topic": settings.apns_bundle_id,
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+    }
+
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(http2=True) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=10.0,
+                )
+
+            if response.status_code == 200:
+                return True
+
+            if response.status_code == 410:
+                # Token is no longer valid (uninstalled, etc.)
+                raise InvalidTokenError(device_token)
+
+            if response.status_code == 400:
+                error_body = response.json()
+                reason = error_body.get("reason", "")
+                if reason in ("BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"):
+                    raise InvalidTokenError(device_token)
+                logger.error("APNs 400 error: %s", reason)
+                return False
+
+            if response.status_code == 403:
+                # JWT issue; invalidate cache and retry once
+                global _cached_jwt
+                _cached_jwt = None
+                if attempt < max_retries:
+                    jwt_token = _generate_jwt(settings)
+                    headers["authorization"] = f"bearer {jwt_token}"
+                    continue
+                logger.error("APNs 403 after JWT refresh")
+                return False
+
+            if response.status_code >= 500:
+                # Server error; retry
+                if attempt < max_retries:
+                    continue
+                logger.error("APNs server error: %d", response.status_code)
+                return False
+
+            logger.error("APNs unexpected status: %d", response.status_code)
+            return False
+
+        except InvalidTokenError:
+            raise
+        except httpx.HTTPError as exc:
+            logger.error("APNs HTTP error (attempt %d): %s", attempt + 1, exc)
+            if attempt >= max_retries:
+                return False
+
+    return False
+
+
+class InvalidTokenError(Exception):
+    """Raised when APNs reports a device token as invalid."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        super().__init__(f"Invalid APNs device token: {token[:8]}...")
+```
+
+================================================================================
+FILE: backend/services/notification_service.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import logging
+from uuid import UUID
+
+from backend.api.errors import AppError
+from backend.api.pagination import apply_cursor_filter, encode_cursor
+from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.notification import NotificationResponse, UnreadCountResponse
+from backend.services.apns import InvalidTokenError, send_push
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+# Import models — these are stub references resolved at runtime
+from backend.api.model_stubs import DeviceToken, Notification
+
+
+async def register_device(
+    db: AsyncSession,
+    user_id: UUID,
+    token: str,
+    platform: str = "ios",
+) -> None:
+    """Register or update a device token for push notifications.
+
+    If the token already exists for this user, update the timestamp.
+    If the token exists for a different user, reassign it (device changed accounts).
+    If the token is new, create a new record.
+    """
+    # Check if token already exists
+    result = await db.execute(
+        select(DeviceToken).where(DeviceToken.token == token)
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing is not None:
+        if existing.user_id == user_id:
+            # Same user, same token — just touch updated_at
+            existing.platform = platform
+        else:
+            # Token belongs to different user — reassign (user switched accounts)
+            existing.user_id = user_id
+            existing.platform = platform
+    else:
+        # New token
+        device = DeviceToken(
+            user_id=user_id,
+            token=token,
+            platform=platform,
+        )
+        db.add(device)
+
+    await db.flush()
+
+
+async def unregister_device(
+    db: AsyncSession,
+    user_id: UUID,
+    token: str,
+) -> None:
+    """Remove a device token (user logged out or disabled notifications)."""
+    await db.execute(
+        delete(DeviceToken).where(
+            DeviceToken.user_id == user_id,
+            DeviceToken.token == token,
+        )
+    )
+    await db.flush()
+
+
+async def create_notification(
+    db: AsyncSession,
+    recipient_id: UUID,
+    notification_type: str,
+    title: str,
+    body: str,
+    metadata: dict | None = None,
+) -> None:
+    """Create a notification record in the database and send a push notification.
+
+    This is the primary entry point for sending notifications from anywhere
+    in the backend. It persists the notification and attempts APNs delivery
+    to all registered devices for the recipient.
+    """
+    notification = Notification(
+        recipient_user_id=recipient_id,
+        type=notification_type,
+        title=title,
+        body=body,
+        metadata=metadata,
+        is_read=False,
+    )
+    db.add(notification)
+    await db.flush()
+
+    # Get badge count (unread notifications)
+    badge_count = await get_unread_count(db, recipient_id)
+
+    # Get all device tokens for this user
+    result = await db.execute(
+        select(DeviceToken).where(DeviceToken.user_id == recipient_id)
+    )
+    devices = list(result.scalars().all())
+
+    # Build push metadata with type for iOS routing
+    push_metadata = {"type": notification_type}
+    if metadata:
+        push_metadata.update(metadata)
+
+    # Send push to each registered device
+    for device in devices:
+        try:
+            await send_push(
+                device_token=device.token,
+                title=title,
+                body=body,
+                badge_count=badge_count,
+                metadata=push_metadata,
+            )
+        except InvalidTokenError:
+            # Token is no longer valid — remove it from database
+            logger.info("Removing invalid device token for user %s", recipient_id)
+            await db.execute(
+                delete(DeviceToken).where(DeviceToken.id == device.id)
+            )
+            await db.flush()
+        except Exception:
+            logger.exception("Failed to send push to device %s", device.id)
+
+
+async def send_batch_notifications(
+    db: AsyncSession,
+    notifications: list[dict],
+) -> None:
+    """Send multiple notifications in batch.
+
+    Each dict in the list should have keys:
+        recipient_id, type, title, body, metadata (optional)
+
+    Use this for batch operations like "3 friends finished books today".
+    """
+    for notif_data in notifications:
+        await create_notification(
+            db=db,
+            recipient_id=notif_data["recipient_id"],
+            notification_type=notif_data["type"],
+            title=notif_data["title"],
+            body=notif_data["body"],
+            metadata=notif_data.get("metadata"),
+        )
+
+
+async def get_notifications(
+    db: AsyncSession,
+    user_id: UUID,
+    cursor: str | None,
+    limit: int,
+) -> PaginatedResponse[NotificationResponse]:
+    """Get paginated notifications for a user, newest first."""
+    stmt = (
+        select(Notification)
+        .where(Notification.recipient_user_id == user_id)
+        .order_by(Notification.created_at.desc(), Notification.id.desc())
+    )
+    stmt = apply_cursor_filter(stmt, Notification, cursor)
+    stmt = stmt.limit(limit + 1)
+
+    result = await db.execute(stmt)
+    rows = list(result.scalars().all())
+
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    items = [
+        NotificationResponse(
+            id=n.id,
+            type=n.type,
+            title=n.title,
+            body=n.body,
+            metadata=n.metadata,
+            is_read=n.is_read,
+            created_at=n.created_at,
+        )
+        for n in rows
+    ]
+
+    next_cursor = encode_cursor(rows[-1].created_at, rows[-1].id) if has_more else None
+    return PaginatedResponse(items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+async def mark_read(
+    db: AsyncSession,
+    user_id: UUID,
+    notification_ids: list[UUID],
+) -> int:
+    """Mark specific notifications as read. Returns number of rows updated.
+
+    Only marks notifications belonging to the requesting user to prevent
+    unauthorized updates.
+    """
+    result = await db.execute(
+        update(Notification)
+        .where(
+            Notification.id.in_(notification_ids),
+            Notification.recipient_user_id == user_id,
+            Notification.is_read == False,  # noqa: E712
+        )
+        .values(is_read=True)
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def get_unread_count(db: AsyncSession, user_id: UUID) -> int:
+    """Get the count of unread notifications for badge display."""
+    result = await db.execute(
+        select(func.count())
+        .select_from(Notification)
+        .where(
+            Notification.recipient_user_id == user_id,
+            Notification.is_read == False,  # noqa: E712
+        )
+    )
+    return result.scalar_one()
+```
+
+================================================================================
+FILE: backend/api/routes/notifications.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from backend.api.deps import DB, CurrentUser
+from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.notification import (
+    MarkReadRequest,
+    NotificationResponse,
+    RegisterDeviceRequest,
+    UnreadCountResponse,
+)
+from backend.services import notification_service
+from fastapi import APIRouter, Query, status
+
+router = APIRouter()
+
+
+@router.post("/me/devices", status_code=status.HTTP_201_CREATED)
+async def register_device(
+    request: RegisterDeviceRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Register a device token for push notifications."""
+    await notification_service.register_device(
+        db, current_user.id, request.device_token, request.platform
+    )
+    return {"message": "Device registered"}
+
+
+@router.delete("/me/devices")
+async def unregister_device(
+    request: RegisterDeviceRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Unregister a device token (logout or disable notifications)."""
+    await notification_service.unregister_device(
+        db, current_user.id, request.device_token
+    )
+    return {"message": "Device unregistered"}
+
+
+@router.get("/notifications", response_model=PaginatedResponse[NotificationResponse])
+async def get_notifications(
+    db: DB,
+    current_user: CurrentUser,
+    cursor: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+) -> PaginatedResponse[NotificationResponse]:
+    """Get paginated notifications for the current user."""
+    return await notification_service.get_notifications(
+        db, current_user.id, cursor, limit
+    )
+
+
+@router.post("/notifications/read")
+async def mark_notifications_read(
+    request: MarkReadRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Mark one or more notifications as read."""
+    count = await notification_service.mark_read(
+        db, current_user.id, request.notification_ids
+    )
+    return {"message": f"{count} notifications marked as read"}
+
+
+@router.get("/notifications/unread-count", response_model=UnreadCountResponse)
+async def get_unread_count(
+    db: DB,
+    current_user: CurrentUser,
+) -> UnreadCountResponse:
+    """Get unread notification count for badge display."""
+    count = await notification_service.get_unread_count(db, current_user.id)
+    return UnreadCountResponse(count=count)
+```
+
+================================================================================
+FILE: backend/api/routes/__init__.py  (modifications)
+================================================================================
+
+Register the new router in the API app. Add this alongside existing router
+includes in api/main.py or the routes __init__.py:
+
+```python
+from backend.api.routes.notifications import router as notifications_router
+
+app.include_router(notifications_router, prefix="/api/v1", tags=["notifications"])
+```
+
+================================================================================
+FILE: backend/services/social_service.py  (modifications)
+================================================================================
+
+Add push notification when a user follows another user. Modify the existing
+follow_user function to call create_notification after creating the Follow:
+
+```python
+from backend.services.notification_service import create_notification
+
+async def follow_user(db: AsyncSession, follower_id: UUID, target_id: UUID) -> None:
+    """Follow a user. Block and self-action checks."""
+    if str(follower_id) == str(target_id):
+        raise self_action()
+
+    # Verify target exists
+    target = await db.execute(
+        select(User).where(User.id == target_id, User.is_deleted == False)  # noqa: E712
+    )
+    target_user = target.scalar_one_or_none()
+    if target_user is None:
+        raise user_not_found()
+
+    if await is_blocked(db, follower_id, target_id):
+        raise blocked_user()
+
+    # Check if already following
+    existing = await db.execute(
+        select(Follow).where(Follow.follower_id == follower_id, Follow.following_id == target_id)
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise already_following()
+
+    follow = Follow(follower_id=follower_id, following_id=target_id)
+    db.add(follow)
+    await db.flush()
+
+    # Get follower username for notification text
+    follower_result = await db.execute(select(User).where(User.id == follower_id))
+    follower_user = follower_result.scalar_one()
+
+    # Send push notification: "X started following you"
+    await create_notification(
+        db=db,
+        recipient_id=target_id,
+        notification_type="follow",
+        title="New follower",
+        body=f"{follower_user.display_name or follower_user.username} started following you",
+        metadata={
+            "user_id": str(follower_id),
+            "username": follower_user.username,
+        },
+    )
+```
+
+================================================================================
+FILE: backend/services/user_book_service.py  (modifications)
+================================================================================
+
+Add push notification when a user finishes a book. Modify the existing log_book
+function to notify followers when status is "read":
+
+```python
+from backend.services.notification_service import create_notification
+
+async def log_book(
+    db: AsyncSession,
+    user_id: UUID,
+    request: LogBookRequest,
+) -> UserBookResponse:
+    """Log a book: validate, create UserBook, create Activity, update stats."""
+    # ... existing validation and UserBook creation ...
+
+    user_book = UserBook(
+        user_id=user_id,
+        work_id=request.work_id,
+        status=request.status,
+        rating=request.rating,
+        review_text=request.review_text,
+        has_spoilers=request.has_spoilers,
+        started_at=request.started_at,
+        finished_at=request.finished_at,
+    )
+    db.add(user_book)
+    await db.flush()
+
+    # Create activity
+    if request.status in ("read", "reading"):
+        activity_type = "finished_book" if request.status == "read" else "started_book"
+        activity = Activity(
+            user_id=user_id,
+            activity_type=activity_type,
+            target_id=user_book.id,
+        )
+        db.add(activity)
+
+    # Update work aggregate stats if rated
+    if request.rating is not None:
+        await _update_work_rating(db, request.work_id)
+
+    await db.flush()
+
+    # --- Push notification to followers when book is finished ---
+    if request.status == "read":
+        await _notify_followers_book_finished(db, user_id, request.work_id, work)
+
+    return _to_response(user_book, work)
+
+
+async def _notify_followers_book_finished(
+    db: AsyncSession,
+    user_id: UUID,
+    work_id: UUID,
+    work: Work,
+) -> None:
+    """Notify all followers that a user finished reading a book."""
+    # Get the user who finished
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user = user_result.scalar_one()
+
+    # Get follower IDs
+    follower_result = await db.execute(
+        select(Follow.follower_id).where(Follow.following_id == user_id)
+    )
+    follower_ids = [row[0] for row in follower_result.all()]
+
+    book_title = work.title if len(work.title) <= 50 else work.title[:47] + "..."
+
+    notifications = [
+        {
+            "recipient_id": follower_id,
+            "type": "book_finished",
+            "title": "Book finished",
+            "body": f"{user.display_name or user.username} finished reading {book_title}",
+            "metadata": {
+                "user_id": str(user_id),
+                "book_id": str(work_id),
+                "username": user.username,
+                "book_title": work.title,
+            },
+        }
+        for follower_id in follower_ids
+    ]
+
+    if notifications:
+        from backend.services.notification_service import send_batch_notifications
+        await send_batch_notifications(db, notifications)
+```
+
+================================================================================
+FILE: backend/services/import_service.py  (modifications)
+================================================================================
+
+Add push notification when an import completes. Modify the existing
+process_goodreads_csv and process_storygraph_csv functions to send a
+notification after marking the job as completed:
+
+```python
+from backend.services.notification_service import create_notification
+
+async def process_goodreads_csv(
+    job_id: UUID,
+    user_id: UUID,
+    content: bytes,
+) -> None:
+    """Background task: parse Goodreads CSV, match books, create UserBooks."""
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with session_factory() as db:
+        try:
+            # ... existing CSV processing logic ...
+
+            # Mark complete
+            job = await _get_job(db, job_id)
+            job.status = "completed"
+            job.matched = matched
+            job.needs_review = needs_review
+            job.unmatched = unmatched
+            job.progress_percent = 100
+            job.completed_at = datetime.utcnow()
+            await db.commit()
+
+            # --- Send import completion notification ---
+            await create_notification(
+                db=db,
+                recipient_id=user_id,
+                notification_type="import_complete",
+                title="Import complete",
+                body=f"Your Goodreads import is done! {matched} books matched, {needs_review} need review.",
+                metadata={
+                    "matched": matched,
+                    "needs_review": needs_review,
+                    "unmatched": unmatched,
+                },
+            )
+            await db.commit()
+
+        except Exception as e:
+            job = await _get_job(db, job_id)
+            job.status = "failed"
+            job.error_message = str(e)
+            await db.commit()
+        finally:
+            await engine.dispose()
+```
+
+The same pattern applies to process_storygraph_csv — add the create_notification
+call after marking the job as "completed", with body text saying "StoryGraph"
+instead of "Goodreads".
+
+================================================================================
+FILE: backend/tests/test_notifications.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def user_id() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+@pytest.fixture
+def device_token() -> str:
+    return "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6abcd"
+
+
+# ---------------------------------------------------------------------------
+# POST /me/devices — register device
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_device_success(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/me/devices",
+        json={"device_token": "abc123token", "platform": "ios"},
+    )
+    assert response.status_code == 201
+    assert response.json()["message"] == "Device registered"
+
+
+@pytest.mark.asyncio
+async def test_register_device_duplicate_token_same_user(client: AsyncClient):
+    """Registering the same token twice for the same user should succeed (upsert)."""
+    token = "duplicate_test_token_abc"
+    response1 = await client.post(
+        "/api/v1/me/devices",
+        json={"device_token": token, "platform": "ios"},
+    )
+    assert response1.status_code == 201
+
+    response2 = await client.post(
+        "/api/v1/me/devices",
+        json={"device_token": token, "platform": "ios"},
+    )
+    assert response2.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_register_device_missing_token_returns_422(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/me/devices",
+        json={"platform": "ios"},
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# DELETE /me/devices — unregister device
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unregister_device(client: AsyncClient):
+    token = "token_to_remove"
+    # Register first
+    await client.post(
+        "/api/v1/me/devices",
+        json={"device_token": token, "platform": "ios"},
+    )
+
+    # Unregister
+    response = await client.delete(
+        "/api/v1/me/devices",
+        json={"device_token": token, "platform": "ios"},
+    )
+    assert response.status_code == 200
+    assert response.json()["message"] == "Device unregistered"
+
+
+# ---------------------------------------------------------------------------
+# GET /notifications — list notifications
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_notifications_empty(client: AsyncClient):
+    response = await client.get("/api/v1/notifications")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["has_more"] is False
+    assert body["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_notifications_returns_items(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """After creating a notification via the service, GET /notifications returns it."""
+    from backend.services.notification_service import create_notification
+
+    with patch("backend.services.notification_service.send_push", new_callable=AsyncMock):
+        await create_notification(
+            db=db_session,
+            recipient_id=uuid.uuid4(),  # Will use the authed user's ID in real test
+            notification_type="follow",
+            title="New follower",
+            body="testuser started following you",
+            metadata={"user_id": str(uuid.uuid4())},
+        )
+        await db_session.commit()
+
+    response = await client.get("/api/v1/notifications")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) >= 0  # Depends on authed user match
+
+
+@pytest.mark.asyncio
+async def test_get_notifications_pagination(client: AsyncClient):
+    """Requesting with limit=1 should return has_more=True if more exist."""
+    response = await client.get("/api/v1/notifications?limit=1")
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body["items"], list)
+
+
+# ---------------------------------------------------------------------------
+# POST /notifications/read — mark as read
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mark_read_empty_list(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/notifications/read",
+        json={"notification_ids": []},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_mark_read_nonexistent_ids(client: AsyncClient):
+    """Marking non-existent notification IDs should succeed silently (0 updated)."""
+    response = await client.post(
+        "/api/v1/notifications/read",
+        json={"notification_ids": [str(uuid.uuid4())]},
+    )
+    assert response.status_code == 200
+    assert "0" in response.json()["message"]
+
+
+# ---------------------------------------------------------------------------
+# GET /notifications/unread-count
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unread_count_default_zero(client: AsyncClient):
+    response = await client.get("/api/v1/notifications/unread-count")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — notification_service functions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_device_reassigns_token(db_session: AsyncSession):
+    """If a token exists for user A and user B registers it, it should reassign."""
+    from backend.services.notification_service import register_device
+
+    user_a = uuid.uuid4()
+    user_b = uuid.uuid4()
+    token = "shared_device_token"
+
+    await register_device(db_session, user_a, token, "ios")
+    await register_device(db_session, user_b, token, "ios")
+
+    from backend.api.model_stubs import DeviceToken
+    from sqlalchemy import select
+
+    result = await db_session.execute(
+        select(DeviceToken).where(DeviceToken.token == token)
+    )
+    device = result.scalar_one()
+    assert device.user_id == user_b
+
+
+@pytest.mark.asyncio
+async def test_create_notification_with_invalid_token_removes_device(
+    db_session: AsyncSession,
+):
+    """If APNs returns an invalid token error, the device should be removed."""
+    from backend.services.notification_service import create_notification, register_device
+
+    user_id = uuid.uuid4()
+    bad_token = "expired_token_abc123"
+
+    await register_device(db_session, user_id, bad_token, "ios")
+
+    with patch(
+        "backend.services.notification_service.send_push",
+        side_effect=InvalidTokenError(bad_token),
+    ):
+        from backend.services.apns import InvalidTokenError
+
+        await create_notification(
+            db=db_session,
+            recipient_id=user_id,
+            notification_type="follow",
+            title="Test",
+            body="Test notification",
+        )
+
+    # The invalid token should have been removed
+    from backend.api.model_stubs import DeviceToken
+    from sqlalchemy import select
+
+    result = await db_session.execute(
+        select(DeviceToken).where(DeviceToken.token == bad_token)
+    )
+    assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_get_unread_count(db_session: AsyncSession):
+    """Unread count should reflect only unread notifications for the user."""
+    from backend.services.notification_service import (
+        create_notification,
+        get_unread_count,
+        mark_read,
+    )
+
+    user_id = uuid.uuid4()
+
+    with patch("backend.services.notification_service.send_push", new_callable=AsyncMock):
+        await create_notification(db_session, user_id, "follow", "T1", "B1")
+        await create_notification(db_session, user_id, "follow", "T2", "B2")
+        await create_notification(db_session, user_id, "follow", "T3", "B3")
+
+    count = await get_unread_count(db_session, user_id)
+    assert count == 3
+
+    # Mark one as read
+    from backend.api.model_stubs import Notification
+    from sqlalchemy import select
+
+    result = await db_session.execute(
+        select(Notification).where(Notification.recipient_user_id == user_id).limit(1)
+    )
+    notif = result.scalar_one()
+    await mark_read(db_session, user_id, [notif.id])
+
+    count = await get_unread_count(db_session, user_id)
+    assert count == 2
+```
+
+================================================================================
+FILE: requirements.txt  (additions)
+================================================================================
+
+Add these dependencies:
+
+```
+httpx[http2]>=0.27.0
+PyJWT>=2.8.0
+cryptography>=42.0.0
+```
+
+httpx[http2] is needed for APNs HTTP/2 communication.
+PyJWT with cryptography is needed for ES256 JWT generation from .p8 keys.

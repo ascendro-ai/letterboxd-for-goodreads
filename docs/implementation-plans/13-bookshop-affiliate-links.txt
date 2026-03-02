@@ -1,0 +1,588 @@
+================================================================================
+IMPLEMENTATION PLAN: Bookshop.org Affiliate Links
+================================================================================
+
+Feature: Bookshop.org affiliate links on book detail pages. ~10% commission per
+sale. Uses ISBN-based direct links when available, falls back to title search.
+
+================================================================================
+FILE: backend/services/affiliate_service.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from urllib.parse import quote_plus
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def get_best_isbn_for_work(db: AsyncSession, work_id: UUID) -> str | None:
+    """Query editions for a work and return the best ISBN available.
+
+    Preference order:
+      1. ISBN-13 from an English edition (most recent first)
+      2. ISBN-10 from an English edition (most recent first)
+      3. ISBN-13 from any edition (most recent first)
+      4. ISBN-10 from any edition (most recent first)
+
+    Returns None if no edition has any ISBN.
+    """
+    from backend.api.model_stubs import Edition
+
+    # Try English editions with ISBN-13 first
+    result = await db.execute(
+        select(Edition.isbn_13)
+        .where(
+            Edition.work_id == work_id,
+            Edition.isbn_13.isnot(None),
+            Edition.isbn_13 != "",
+            Edition.language.in_(["en", "eng", "English"]),
+        )
+        .order_by(Edition.publish_date.desc().nulls_last())
+        .limit(1)
+    )
+    isbn = result.scalar_one_or_none()
+    if isbn:
+        return isbn
+
+    # Try English editions with ISBN-10
+    result = await db.execute(
+        select(Edition.isbn_10)
+        .where(
+            Edition.work_id == work_id,
+            Edition.isbn_10.isnot(None),
+            Edition.isbn_10 != "",
+            Edition.language.in_(["en", "eng", "English"]),
+        )
+        .order_by(Edition.publish_date.desc().nulls_last())
+        .limit(1)
+    )
+    isbn = result.scalar_one_or_none()
+    if isbn:
+        return isbn
+
+    # Try any edition with ISBN-13
+    result = await db.execute(
+        select(Edition.isbn_13)
+        .where(
+            Edition.work_id == work_id,
+            Edition.isbn_13.isnot(None),
+            Edition.isbn_13 != "",
+        )
+        .order_by(Edition.publish_date.desc().nulls_last())
+        .limit(1)
+    )
+    isbn = result.scalar_one_or_none()
+    if isbn:
+        return isbn
+
+    # Try any edition with ISBN-10
+    result = await db.execute(
+        select(Edition.isbn_10)
+        .where(
+            Edition.work_id == work_id,
+            Edition.isbn_10.isnot(None),
+            Edition.isbn_10 != "",
+        )
+        .order_by(Edition.publish_date.desc().nulls_last())
+        .limit(1)
+    )
+    isbn = result.scalar_one_or_none()
+    if isbn:
+        return isbn
+
+    return None
+
+
+def generate_bookshop_url(
+    isbn: str | None,
+    title: str,
+    affiliate_id: str,
+) -> str | None:
+    """Generate a Bookshop.org affiliate URL.
+
+    - If affiliate_id is empty/missing, returns None (feature disabled).
+    - If ISBN is available, returns a direct product link.
+    - If no ISBN but title is available, returns a search URL.
+    """
+    if not affiliate_id:
+        return None
+
+    if isbn:
+        return f"https://bookshop.org/a/{affiliate_id}/{isbn}"
+
+    if title:
+        encoded_title = quote_plus(title)
+        return f"https://bookshop.org/a/{affiliate_id}?q={encoded_title}"
+
+    return None
+```
+
+================================================================================
+FILE: backend/services/book_service.py  (modifications)
+================================================================================
+
+Replace the existing `build_bookshop_url` import and usage in `get_book_detail()`
+with the new affiliate service. The changes affect three functions:
+`get_book_detail`, `get_similar_books`, and `get_popular_books`.
+
+Change this import at the top of the file:
+
+```python
+# REMOVE this line:
+from backend.api.utils import build_bookshop_url
+
+# ADD these lines:
+from backend.services.affiliate_service import generate_bookshop_url, get_best_isbn_for_work
+```
+
+Replace the `get_book_detail` function body (starting after the editions_count
+calculation) with:
+
+```python
+async def get_book_detail(db: AsyncSession, work_id: UUID) -> BookDetail:
+    """Get full book detail with authors and edition count."""
+    result = await db.execute(select(Work).where(Work.id == work_id))
+    work = result.scalar_one_or_none()
+    if work is None:
+        raise book_not_found()
+
+    # Count editions
+    editions_count_result = await db.execute(
+        select(func.count()).select_from(Edition).where(Edition.work_id == work_id)
+    )
+    editions_count = editions_count_result.scalar() or 0
+
+    # Generate affiliate link with ISBN preference
+    settings = get_settings()
+    isbn = await get_best_isbn_for_work(db, work_id)
+    bookshop_url = generate_bookshop_url(isbn, work.title, settings.bookshop_affiliate_id)
+
+    return BookDetail(
+        id=work.id,
+        title=work.title,
+        original_title=work.original_title,
+        description=work.description,
+        first_published_year=work.first_published_year,
+        authors=[AuthorBrief(id=a.id, name=a.name) for a in (work.authors or [])],
+        subjects=work.subjects or [],
+        cover_image_url=work.cover_image_url,
+        average_rating=work.average_rating,
+        ratings_count=work.ratings_count,
+        editions_count=editions_count,
+        bookshop_url=bookshop_url,
+    )
+```
+
+In `get_similar_books`, update the BookDetail construction inside the loop:
+
+```python
+    settings = get_settings()
+    similar = []
+    for row in rows:
+        work = works_map.get(row.work_id)
+        if work:
+            isbn = await get_best_isbn_for_work(db, row.work_id)
+            similar.append(
+                BookDetail(
+                    id=work.id,
+                    title=work.title,
+                    original_title=work.original_title,
+                    description=work.description,
+                    first_published_year=work.first_published_year,
+                    authors=[AuthorBrief(id=a.id, name=a.name) for a in (work.authors or [])],
+                    subjects=work.subjects or [],
+                    cover_image_url=work.cover_image_url,
+                    average_rating=work.average_rating,
+                    ratings_count=work.ratings_count,
+                    bookshop_url=generate_bookshop_url(isbn, work.title, settings.bookshop_affiliate_id),
+                )
+            )
+```
+
+In `get_popular_books`, update the list comprehension to use async ISBN lookup.
+Since list comprehensions cannot be async, convert to a loop:
+
+```python
+    settings = get_settings()
+    items = []
+    for w in works:
+        isbn = await get_best_isbn_for_work(db, w.id)
+        items.append(
+            BookDetail(
+                id=w.id,
+                title=w.title,
+                original_title=w.original_title,
+                description=w.description,
+                first_published_year=w.first_published_year,
+                authors=[AuthorBrief(id=a.id, name=a.name) for a in (w.authors or [])],
+                subjects=w.subjects or [],
+                cover_image_url=w.cover_image_url,
+                average_rating=w.average_rating,
+                ratings_count=w.ratings_count,
+                bookshop_url=generate_bookshop_url(isbn, w.title, settings.bookshop_affiliate_id),
+            )
+        )
+```
+
+================================================================================
+FILE: backend/api/schemas/books.py  (confirmation)
+================================================================================
+
+The existing BookDetail schema already contains `bookshop_url: str | None = None`
+on line 30. No changes needed. The field is present and typed correctly.
+
+================================================================================
+FILE: backend/api/config.py  (confirmation)
+================================================================================
+
+The existing Settings class already contains `bookshop_affiliate_id: str = ""`
+on line 15. No changes needed. Set the BOOKSHOP_AFFILIATE_ID env var to your
+Bookshop.org affiliate ID to enable the feature.
+
+================================================================================
+FILE: backend/api/utils.py  (deprecation note)
+================================================================================
+
+The existing `build_bookshop_url(title, affiliate_id)` in utils.py is superseded
+by `affiliate_service.generate_bookshop_url()`. Once all callers are migrated
+(see book_service.py modifications above), the old function can be removed:
+
+```python
+from __future__ import annotations
+
+import re
+import unicodedata
+
+
+def slugify(text: str) -> str:
+    """Convert text to a URL-safe slug."""
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^\w\s-]", "", text.lower())
+    return re.sub(r"[-\s]+", "-", text).strip("-")
+
+
+# build_bookshop_url() removed — replaced by backend.services.affiliate_service
+```
+
+================================================================================
+FILE: backend/tests/test_affiliate.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.services.affiliate_service import generate_bookshop_url, get_best_isbn_for_work
+
+
+# ---------------------------------------------------------------------------
+# Unit tests -- generate_bookshop_url
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateBookshopUrl:
+    def test_isbn_produces_direct_link(self):
+        url = generate_bookshop_url("9780143127741", "Test Book", "shelf123")
+        assert url == "https://bookshop.org/a/shelf123/9780143127741"
+
+    def test_isbn10_produces_direct_link(self):
+        url = generate_bookshop_url("0143127748", "Test Book", "shelf123")
+        assert url == "https://bookshop.org/a/shelf123/0143127748"
+
+    def test_no_isbn_falls_back_to_title_search(self):
+        url = generate_bookshop_url(None, "The Great Gatsby", "shelf123")
+        assert url == "https://bookshop.org/a/shelf123?q=The+Great+Gatsby"
+
+    def test_title_with_special_characters_is_encoded(self):
+        url = generate_bookshop_url(None, "War & Peace", "shelf123")
+        assert url == "https://bookshop.org/a/shelf123?q=War+%26+Peace"
+
+    def test_no_affiliate_id_returns_none(self):
+        url = generate_bookshop_url("9780143127741", "Test Book", "")
+        assert url is None
+
+    def test_empty_string_affiliate_id_returns_none(self):
+        url = generate_bookshop_url("9780143127741", "Test Book", "")
+        assert url is None
+
+    def test_isbn_preferred_over_title(self):
+        url = generate_bookshop_url("9780143127741", "Some Title", "shelf123")
+        assert "9780143127741" in url
+        assert "q=" not in url
+
+    def test_no_isbn_no_title_returns_none(self):
+        url = generate_bookshop_url(None, "", "shelf123")
+        assert url is None
+
+
+# ---------------------------------------------------------------------------
+# Integration tests -- get_best_isbn_for_work
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_best_isbn_prefers_isbn13_english(db_session: AsyncSession, test_work):
+    """ISBN-13 from an English edition should be preferred."""
+    from backend.api.model_stubs import Edition
+
+    # Add English edition with ISBN-13
+    edition_en = Edition(
+        id=str(uuid.uuid4()),
+        work_id=test_work.id,
+        isbn_13="9781234567890",
+        isbn_10="1234567890",
+        language="en",
+        publish_date="2023",
+    )
+    db_session.add(edition_en)
+
+    # Add non-English edition with ISBN-13
+    edition_fr = Edition(
+        id=str(uuid.uuid4()),
+        work_id=test_work.id,
+        isbn_13="9789876543210",
+        language="fr",
+        publish_date="2024",
+    )
+    db_session.add(edition_fr)
+    await db_session.commit()
+
+    isbn = await get_best_isbn_for_work(db_session, test_work.id)
+    assert isbn == "9781234567890"
+
+
+@pytest.mark.asyncio
+async def test_best_isbn_falls_back_to_isbn10_english(db_session: AsyncSession, test_work):
+    """If no ISBN-13 on English editions, fall back to ISBN-10."""
+    from backend.api.model_stubs import Edition
+
+    edition = Edition(
+        id=str(uuid.uuid4()),
+        work_id=test_work.id,
+        isbn_10="1234567890",
+        language="en",
+        publish_date="2022",
+    )
+    db_session.add(edition)
+    await db_session.commit()
+
+    isbn = await get_best_isbn_for_work(db_session, test_work.id)
+    assert isbn == "1234567890"
+
+
+@pytest.mark.asyncio
+async def test_best_isbn_falls_back_to_any_edition(db_session: AsyncSession, test_work):
+    """If no English editions, use ISBN-13 from any edition."""
+    from backend.api.model_stubs import Edition
+
+    edition = Edition(
+        id=str(uuid.uuid4()),
+        work_id=test_work.id,
+        isbn_13="9789876543210",
+        language="fr",
+        publish_date="2021",
+    )
+    db_session.add(edition)
+    await db_session.commit()
+
+    isbn = await get_best_isbn_for_work(db_session, test_work.id)
+    assert isbn == "9789876543210"
+
+
+@pytest.mark.asyncio
+async def test_best_isbn_no_editions_returns_none(db_session: AsyncSession, test_work):
+    """Work with no editions returns None."""
+    isbn = await get_best_isbn_for_work(db_session, test_work.id)
+    assert isbn is None
+
+
+@pytest.mark.asyncio
+async def test_best_isbn_editions_without_isbn_returns_none(db_session: AsyncSession, test_work):
+    """Editions that have no ISBNs at all return None."""
+    from backend.api.model_stubs import Edition
+
+    edition = Edition(
+        id=str(uuid.uuid4()),
+        work_id=test_work.id,
+        language="en",
+        publish_date="2023",
+    )
+    db_session.add(edition)
+    await db_session.commit()
+
+    isbn = await get_best_isbn_for_work(db_session, test_work.id)
+    assert isbn is None
+
+
+@pytest.mark.asyncio
+async def test_best_isbn_prefers_most_recent_english(db_session: AsyncSession, test_work):
+    """Among English editions with ISBN-13, prefer the most recent."""
+    from backend.api.model_stubs import Edition
+
+    old_edition = Edition(
+        id=str(uuid.uuid4()),
+        work_id=test_work.id,
+        isbn_13="9781111111111",
+        language="en",
+        publish_date="2010",
+    )
+    new_edition = Edition(
+        id=str(uuid.uuid4()),
+        work_id=test_work.id,
+        isbn_13="9782222222222",
+        language="en",
+        publish_date="2023",
+    )
+    db_session.add_all([old_edition, new_edition])
+    await db_session.commit()
+
+    isbn = await get_best_isbn_for_work(db_session, test_work.id)
+    assert isbn == "9782222222222"
+
+
+# ---------------------------------------------------------------------------
+# Integration test -- book detail endpoint includes bookshop_url
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_book_detail_includes_bookshop_url(client, test_work, test_edition):
+    """GET /books/{id} should include a bookshop_url when affiliate ID is configured."""
+    from unittest.mock import patch
+
+    with patch("backend.services.book_service.get_settings") as mock_settings:
+        mock_settings.return_value.bookshop_affiliate_id = "shelf123"
+        resp = await client.get(f"/api/v1/books/{test_work.id}")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["bookshop_url"] is not None
+    assert "bookshop.org" in data["bookshop_url"]
+
+
+@pytest.mark.asyncio
+async def test_book_detail_no_affiliate_id_returns_null(client, test_work):
+    """bookshop_url should be null when affiliate ID is not configured."""
+    from unittest.mock import patch
+
+    with patch("backend.services.book_service.get_settings") as mock_settings:
+        mock_settings.return_value.bookshop_affiliate_id = ""
+        resp = await client.get(f"/api/v1/books/{test_work.id}")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["bookshop_url"] is None
+```
+
+================================================================================
+FILE: ios/Shelf/Components/BookshopButton.swift
+================================================================================
+
+```swift
+import SafariServices
+import SwiftUI
+
+struct BookshopButton: View {
+    let urlString: String
+
+    @State private var showSafari = false
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Button {
+                AnalyticsService.track(.affiliateLinkTapped, properties: [
+                    "url": urlString,
+                    "source": "book_detail",
+                ])
+                showSafari = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "book.closed")
+                        .font(.subheadline)
+                    Text("Buy on Bookshop.org")
+                        .font(.subheadline.weight(.medium))
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .background(Color(.systemGray5))
+                .foregroundStyle(.primary)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+
+            Text("Affiliate link — we earn a small commission")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .fullScreenCover(isPresented: $showSafari) {
+            if let url = URL(string: urlString) {
+                SafariView(url: url)
+                    .ignoresSafeArea()
+            }
+        }
+    }
+}
+
+// MARK: - SFSafariViewController wrapper
+
+struct SafariView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let config = SFSafariViewController.Configuration()
+        config.entersReaderIfAvailable = false
+        config.barCollapsingEnabled = true
+
+        let controller = SFSafariViewController(url: url, configuration: config)
+        controller.preferredControlTintColor = .systemBlue
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/BookDetail/BookDetailView.swift  (modifications)
+================================================================================
+
+Replace the existing inline bookshop link block (lines 160-172 in the current
+file) with the reusable BookshopButton component. Locate the section comment
+"// Bookshop affiliate link" and replace it:
+
+REMOVE this block:
+
+```swift
+                // Bookshop affiliate link
+                if let url = book.bookshopURL, let bookshopURL = URL(string: url) {
+                    Link(destination: bookshopURL) {
+                        Label("Buy on Bookshop.org", systemImage: "cart")
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .background(Color(.systemGray5))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .padding(.horizontal)
+                }
+```
+
+REPLACE with:
+
+```swift
+                // Bookshop affiliate link
+                if let url = book.bookshopURL {
+                    BookshopButton(urlString: url)
+                        .padding(.horizontal)
+                }
+```
+
+This provides an in-app Safari browser instead of launching external Safari,
+adds analytics tracking, and adds the affiliate disclosure text.

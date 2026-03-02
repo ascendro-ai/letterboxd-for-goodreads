@@ -1,5 +1,5 @@
 /// Share extension that extracts ISBNs from shared URLs (Amazon, Bookshop.org,
-/// Goodreads, Google Books) and opens the main app to log the book.
+/// Goodreads, Google Books, OpenLibrary) and opens the main app to log the book.
 
 import UIKit
 import Social
@@ -92,11 +92,10 @@ class ShareViewController: UIViewController {
         }
     }
 
-    // ISBNs are either 10 or 13 digits. Extract the first numeric sequence of that length from known URL patterns.
+    // ISBNs are either 10 or 13 digits. Extract from known URL patterns.
     private func extractISBN(from url: URL) -> String? {
         let urlString = url.absoluteString
 
-        // Common book URL patterns
         // Amazon: /dp/ISBN or /gp/product/ISBN
         if urlString.contains("amazon") {
             let patterns = ["/dp/", "/gp/product/"]
@@ -122,6 +121,25 @@ class ShareViewController: UIViewController {
             if let range = urlString.range(of: "/isbn/") {
                 let isbn = String(urlString[range.upperBound...].prefix(while: { $0.isNumber || $0 == "X" }))
                 if isbn.count == 10 || isbn.count == 13 { return isbn }
+            }
+        }
+
+        // Goodreads: extract ISBN from URL path if present, or use book ID for search
+        if urlString.contains("goodreads.com") {
+            // Some Goodreads URLs contain ISBNs in query params
+            if let components = URLComponents(string: urlString),
+               let isbn = components.queryItems?.first(where: { $0.name == "isbn" })?.value,
+               (isbn.count == 10 || isbn.count == 13) {
+                return isbn
+            }
+        }
+
+        // Google Books: extract ISBN from query params
+        if urlString.contains("books.google") {
+            if let components = URLComponents(string: urlString),
+               let isbn = components.queryItems?.first(where: { $0.name == "isbn" })?.value,
+               (isbn.count == 10 || isbn.count == 13) {
+                return isbn
             }
         }
 

@@ -47,13 +47,15 @@ struct ImportView: View {
             Picker("Source", selection: $viewModel.selectedSource) {
                 Text("Goodreads").tag(ImportSource.goodreads)
                 Text("StoryGraph").tag(ImportSource.storygraph)
+                Text("Kindle").tag(ImportSource.kindle)
+                Text("Kobo").tag(ImportSource.kobo)
             }
             .pickerStyle(.segmented)
 
             Button {
                 showFilePicker = true
             } label: {
-                Label("Choose CSV File", systemImage: "doc")
+                Label(filePickerLabel, systemImage: "doc")
                     .font(.body.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 48)
@@ -77,7 +79,7 @@ struct ImportView: View {
         }
         .fileImporter(
             isPresented: $showFilePicker,
-            allowedContentTypes: [UTType.commaSeparatedText],
+            allowedContentTypes: allowedContentTypes,
             allowsMultipleSelection: false
         ) { result in
             handleFileSelection(result)
@@ -166,6 +168,22 @@ struct ImportView: View {
         case .processing: "Importing your library..."
         case .completed: "Import complete!"
         case .failed: "Import failed"
+        }
+    }
+
+    private var filePickerLabel: String {
+        switch viewModel.selectedSource {
+        case .kindle: "Choose TXT File"
+        case .kobo: "Choose SQLite File"
+        default: "Choose CSV File"
+        }
+    }
+
+    private var allowedContentTypes: [UTType] {
+        switch viewModel.selectedSource {
+        case .kindle: [.plainText]
+        case .kobo: [.database]
+        default: [.commaSeparatedText]
         }
     }
 

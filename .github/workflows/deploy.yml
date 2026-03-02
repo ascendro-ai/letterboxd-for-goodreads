@@ -1,0 +1,28 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.modified, 'backend/')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Backend to Railway
+        uses: bervProject/railway-deploy@main
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+          service: shelf-backend
+
+  deploy-pipeline:
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.modified, 'pipeline/')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Pipeline to Railway
+        uses: bervProject/railway-deploy@main
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+          service: shelf-pipeline

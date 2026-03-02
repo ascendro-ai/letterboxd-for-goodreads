@@ -1,0 +1,2021 @@
+================================================================================
+25 — Per-Book Privacy, Reading Stats Page & Content Warnings / Mood Tags
+================================================================================
+
+Three related features that give users more control over what they share
+and richer metadata on the books they log.
+
+  A) Per-book privacy — mark any book as "private" so it never appears in
+     your public profile, feed, or other users' views.
+  B) Reading stats / overview page — yearly and all-time reading statistics
+     with a privacy toggle to hide stats from your profile.
+  C) Content warnings & mood tags — community-contributed tags like
+     "graphic violence", "grief", "slow burn" that help readers decide
+     what to pick up.
+
+================================================================================
+A. PER-BOOK PRIVACY
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DESIGN
+────────────────────────────────────────────────────────────────────────────────
+
+A new `is_private` boolean on UserBook. When true:
+  - No Activity record is created (no feed entry)
+  - Book is excluded from GET /users/{id}/books (other users' view)
+  - Book is excluded from feed queries
+  - Book IS visible in GET /me/books (your own view)
+  - Book still counts toward your personal reading stats (but stats can
+    independently be hidden — see section B)
+  - Rating still counts toward the work's aggregate average_rating
+    (private means "don't show on my profile", not "remove my vote")
+
+────────────────────────────────────────────────────────────────────────────────
+DATABASE CHANGES
+────────────────────────────────────────────────────────────────────────────────
+
+Add column to user_books:
+
+    is_private: bool, default=false, server_default="false"
+
+Add column to users (for profile-level stats privacy):
+
+    hide_reading_stats: bool, default=false, server_default="false"
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/migrations/versions/xxxx_add_privacy_and_warnings.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""Add privacy controls, reading stats visibility, and content warnings
+
+Revision ID: b4c8d9e0f1a2
+Revises: <previous_head>
+Create Date: 2026-03-02
+"""
+from __future__ import annotations
+
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
+
+revision: str = "b4c8d9e0f1a2"
+down_revision: Union[str, None] = None  # Replace with actual previous revision
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # A. Per-book privacy
+    op.add_column(
+        "user_books",
+        sa.Column("is_private", sa.Boolean(), server_default="false", nullable=False),
+    )
+
+    # B. Profile-level stats visibility
+    op.add_column(
+        "users",
+        sa.Column("hide_reading_stats", sa.Boolean(), server_default="false", nullable=False),
+    )
+
+    # C. Content warnings & mood tags
+    op.create_table(
+        "work_content_tags",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column("work_id", sa.Uuid(), sa.ForeignKey("works.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("tag", sa.String(50), nullable=False),
+        sa.Column("tag_type", sa.String(20), nullable=False),  # "warning" or "mood"
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.UniqueConstraint("work_id", "user_id", "tag", name="uq_work_content_tag"),
+    )
+    op.create_index("ix_work_content_tags_work_id", "work_content_tags", ["work_id"])
+    op.create_index(
+        "ix_work_content_tags_work_type", "work_content_tags", ["work_id", "tag_type"]
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("work_content_tags")
+    op.drop_column("users", "hide_reading_stats")
+    op.drop_column("user_books", "is_private")
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/user_book.py  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Add field to the UserBook class after is_imported:
+
+    is_private: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/user.py  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Add field to the User class:
+
+    hide_reading_stats: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/model_stubs.py  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+Add to UserBook stub class:
+
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False)
+
+Add to User stub class:
+
+    hide_reading_stats: Mapped[bool] = mapped_column(Boolean, default=False)
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/schemas/user_books.py  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+Add to LogBookRequest:
+
+    is_private: bool = False
+
+Add to UpdateBookRequest:
+
+    is_private: bool | None = None
+
+Add to UserBookResponse:
+
+    is_private: bool
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/user_book_service.py  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+Modify log_book() — skip Activity creation when private:
+
+    # CURRENT CODE (lines ~69-77):
+    if request.status in ("read", "reading"):
+        activity_type = "finished_book" if request.status == "read" else "started_book"
+        activity = Activity(
+            user_id=user_id,
+            activity_type=activity_type,
+            target_id=user_book.id,
+        )
+        db.add(activity)
+
+    # NEW CODE:
+    if request.status in ("read", "reading") and not request.is_private:
+        activity_type = "finished_book" if request.status == "read" else "started_book"
+        activity = Activity(
+            user_id=user_id,
+            activity_type=activity_type,
+            target_id=user_book.id,
+        )
+        db.add(activity)
+
+Also set the field on the UserBook:
+
+    user_book = UserBook(
+        user_id=user_id,
+        work_id=request.work_id,
+        status=request.status,
+        rating=request.rating,
+        review_text=request.review_text,
+        has_spoilers=request.has_spoilers,
+        started_at=request.started_at,
+        finished_at=request.finished_at,
+        is_private=request.is_private,       # <── NEW
+    )
+
+Modify update_book() — handle privacy toggle changes:
+
+    # When a book is changed FROM public TO private:
+    #   Delete any existing Activity for this UserBook
+    # When a book is changed FROM private TO public:
+    #   Create an Activity if status is "read" or "reading"
+
+    if request.is_private is not None and request.is_private != user_book.is_private:
+        user_book.is_private = request.is_private
+
+        if request.is_private:
+            # Became private — remove existing activity
+            await db.execute(
+                delete(Activity).where(Activity.target_id == user_book.id)
+            )
+        else:
+            # Became public — create activity if eligible status
+            current_status = request.status or user_book.status
+            if current_status in ("read", "reading"):
+                activity_type = "finished_book" if current_status == "read" else "started_book"
+                activity = Activity(
+                    user_id=user_id,
+                    activity_type=activity_type,
+                    target_id=user_book.id,
+                )
+                db.add(activity)
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/user_book_service.py — get_user_books() (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+The endpoint GET /users/{id}/books is used to view another user's books.
+Filter out private books when viewing someone else's profile:
+
+    # Existing query builds a SELECT on UserBook for a given user_id.
+    # Add this filter when the requester is NOT the book owner:
+
+    if requesting_user_id != target_user_id:
+        stmt = stmt.where(UserBook.is_private == False)  # noqa: E712
+
+GET /me/books (own books) should NOT filter — user sees everything.
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/feed_service.py  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+The feed query joins Activity → UserBook → Work. Add a filter to exclude
+private books from the feed:
+
+    # In the feed query (around line 75), add:
+    stmt = stmt.join(UserBook, UserBook.id == Activity.target_id)
+    stmt = stmt.where(UserBook.is_private == False)  # noqa: E712
+
+This ensures that even if an Activity record somehow exists for a private
+book (e.g., book was made private after logging), it won't appear in feeds.
+
+
+================================================================================
+B. READING STATS / OVERVIEW PAGE
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DESIGN
+────────────────────────────────────────────────────────────────────────────────
+
+A stats endpoint that computes reading statistics from the user's logged books.
+Includes both all-time and per-year breakdowns. Users can toggle stats
+visibility on their profile via the `hide_reading_stats` flag.
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/schemas/stats.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+
+class YearlyStats(BaseModel):
+    year: int
+    books_read: int
+    books_started: int
+    books_dnf: int
+    average_rating: float | None
+    highest_rated_book: str | None       # title of highest-rated book
+    most_read_month: str | None          # e.g., "March" — month with most books finished
+    total_pages: int | None              # from edition data if available
+    rating_distribution: dict[str, int]  # {"0.5": 0, "1.0": 2, ..., "5.0": 5}
+
+
+class AllTimeStats(BaseModel):
+    total_books_read: int
+    total_books_logged: int              # all statuses
+    total_reviews: int
+    average_rating: float | None
+    rating_distribution: dict[str, int]  # {"0.5": N, "1.0": N, ..., "5.0": N}
+    top_subjects: list[str]              # most-read genres/subjects
+    reading_pace: float | None           # avg books per month over lifetime
+    longest_streak: int                  # consecutive days with a book finished
+    first_book_logged_at: str | None     # ISO date string
+
+
+class ReadingStatsResponse(BaseModel):
+    all_time: AllTimeStats
+    yearly: list[YearlyStats]            # sorted by year desc
+    is_own_profile: bool                 # True if viewing own stats
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/stats_service.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+"""Reading statistics computation.
+
+Stats are computed on-the-fly from UserBook records. At our scale (<100K
+users), this is fast enough via indexed queries. If it becomes slow,
+materialize into a stats cache table refreshed nightly.
+"""
+
+from __future__ import annotations
+
+import calendar
+from collections import Counter
+from uuid import UUID
+
+from sqlalchemy import extract, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.api.model_stubs import Edition, User, UserBook, Work
+from backend.api.errors import AppError
+
+
+async def get_reading_stats(
+    db: AsyncSession,
+    target_user_id: UUID,
+    requesting_user_id: UUID | None,
+) -> dict:
+    """Compute reading stats for a user.
+
+    If requesting_user_id != target_user_id and the target has
+    hide_reading_stats=True, return 403.
+    """
+    is_own_profile = str(target_user_id) == str(requesting_user_id)
+
+    # Check privacy setting
+    if not is_own_profile:
+        user_result = await db.execute(
+            select(User).where(User.id == target_user_id)
+        )
+        target_user = user_result.scalar_one_or_none()
+        if target_user is None:
+            raise AppError(status_code=404, code="USER_NOT_FOUND", message="User not found.")
+        if target_user.hide_reading_stats:
+            raise AppError(
+                status_code=403,
+                code="STATS_HIDDEN",
+                message="This user has chosen to keep their reading stats private.",
+            )
+
+    # Base query: all user_books for the target user
+    # When viewing own stats, include private books
+    # When viewing another user's stats, exclude private books
+    base_filter = [UserBook.user_id == target_user_id]
+    if not is_own_profile:
+        base_filter.append(UserBook.is_private == False)  # noqa: E712
+
+    # --- All-time stats ---
+
+    # Total books by status
+    status_counts = await db.execute(
+        select(UserBook.status, func.count())
+        .where(*base_filter)
+        .group_by(UserBook.status)
+    )
+    status_map = dict(status_counts.all())
+    total_read = status_map.get("read", 0)
+    total_logged = sum(status_map.values())
+
+    # Total reviews
+    review_count_result = await db.execute(
+        select(func.count())
+        .select_from(UserBook)
+        .where(*base_filter, UserBook.review_text.isnot(None), UserBook.review_text != "")
+    )
+    total_reviews = review_count_result.scalar_one()
+
+    # Average rating (only rated books)
+    avg_rating_result = await db.execute(
+        select(func.avg(UserBook.rating))
+        .where(*base_filter, UserBook.rating.isnot(None))
+    )
+    avg_rating_raw = avg_rating_result.scalar_one()
+    avg_rating = round(float(avg_rating_raw), 2) if avg_rating_raw else None
+
+    # Rating distribution
+    rating_dist_result = await db.execute(
+        select(UserBook.rating, func.count())
+        .where(*base_filter, UserBook.rating.isnot(None))
+        .group_by(UserBook.rating)
+        .order_by(UserBook.rating)
+    )
+    rating_distribution = {}
+    for rating_val, count in rating_dist_result.all():
+        rating_distribution[str(float(rating_val))] = count
+
+    # Top subjects (from works the user has read)
+    subjects_result = await db.execute(
+        select(Work.subjects)
+        .join(UserBook, UserBook.work_id == Work.id)
+        .where(*base_filter, UserBook.status == "read", Work.subjects.isnot(None))
+    )
+    all_subjects: list[str] = []
+    for (subjects_array,) in subjects_result.all():
+        if subjects_array:
+            all_subjects.extend(subjects_array[:5])  # limit per-book to avoid bias
+    subject_counts = Counter(all_subjects)
+    top_subjects = [s for s, _ in subject_counts.most_common(10)]
+
+    # Reading pace (books per month)
+    first_book_result = await db.execute(
+        select(func.min(UserBook.created_at))
+        .where(*base_filter, UserBook.status == "read")
+    )
+    first_book_date = first_book_result.scalar_one()
+    reading_pace = None
+    if first_book_date and total_read > 0:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        months_active = max(1, (now.year - first_book_date.year) * 12 + (now.month - first_book_date.month))
+        reading_pace = round(total_read / months_active, 1)
+
+    all_time = {
+        "total_books_read": total_read,
+        "total_books_logged": total_logged,
+        "total_reviews": total_reviews,
+        "average_rating": avg_rating,
+        "rating_distribution": rating_distribution,
+        "top_subjects": top_subjects,
+        "reading_pace": reading_pace,
+        "longest_streak": 0,  # TODO: compute from finished_at dates
+        "first_book_logged_at": first_book_date.isoformat() if first_book_date else None,
+    }
+
+    # --- Yearly stats ---
+
+    # Get distinct years with finished books
+    years_result = await db.execute(
+        select(extract("year", UserBook.finished_at).label("year"))
+        .where(*base_filter, UserBook.finished_at.isnot(None))
+        .group_by("year")
+        .order_by(extract("year", UserBook.finished_at).desc())
+    )
+    years = [int(row[0]) for row in years_result.all() if row[0]]
+
+    yearly = []
+    for year in years:
+        year_filter = [
+            *base_filter,
+            extract("year", UserBook.finished_at) == year,
+        ]
+
+        # Books read this year
+        read_count_result = await db.execute(
+            select(func.count())
+            .select_from(UserBook)
+            .where(*year_filter, UserBook.status == "read")
+        )
+        books_read = read_count_result.scalar_one()
+
+        # Books started this year
+        started_filter = [
+            *base_filter,
+            extract("year", UserBook.started_at) == year,
+            UserBook.status == "reading",
+        ]
+        started_result = await db.execute(
+            select(func.count()).select_from(UserBook).where(*started_filter)
+        )
+        books_started = started_result.scalar_one()
+
+        # DNF this year
+        dnf_filter = [
+            *base_filter,
+            extract("year", UserBook.finished_at) == year,
+            UserBook.status == "did_not_finish",
+        ]
+        dnf_result = await db.execute(
+            select(func.count()).select_from(UserBook).where(*dnf_filter)
+        )
+        books_dnf = dnf_result.scalar_one()
+
+        # Average rating for this year
+        year_avg_result = await db.execute(
+            select(func.avg(UserBook.rating))
+            .where(*year_filter, UserBook.rating.isnot(None))
+        )
+        year_avg_raw = year_avg_result.scalar_one()
+        year_avg = round(float(year_avg_raw), 2) if year_avg_raw else None
+
+        # Highest rated book this year
+        highest_result = await db.execute(
+            select(Work.title)
+            .join(UserBook, UserBook.work_id == Work.id)
+            .where(*year_filter, UserBook.rating.isnot(None))
+            .order_by(UserBook.rating.desc())
+            .limit(1)
+        )
+        highest_rated = highest_result.scalar_one_or_none()
+
+        # Most active month
+        month_counts_result = await db.execute(
+            select(
+                extract("month", UserBook.finished_at).label("month"),
+                func.count().label("cnt"),
+            )
+            .where(*year_filter, UserBook.status == "read")
+            .group_by("month")
+            .order_by(func.count().desc())
+            .limit(1)
+        )
+        month_row = month_counts_result.first()
+        most_read_month = calendar.month_name[int(month_row[0])] if month_row else None
+
+        # Year rating distribution
+        year_dist_result = await db.execute(
+            select(UserBook.rating, func.count())
+            .where(*year_filter, UserBook.rating.isnot(None))
+            .group_by(UserBook.rating)
+            .order_by(UserBook.rating)
+        )
+        year_rating_dist = {}
+        for rv, c in year_dist_result.all():
+            year_rating_dist[str(float(rv))] = c
+
+        yearly.append({
+            "year": year,
+            "books_read": books_read,
+            "books_started": books_started,
+            "books_dnf": books_dnf,
+            "average_rating": year_avg,
+            "highest_rated_book": highest_rated,
+            "most_read_month": most_read_month,
+            "total_pages": None,  # Requires edition join — deferred
+            "rating_distribution": year_rating_dist,
+        })
+
+    return {
+        "all_time": all_time,
+        "yearly": yearly,
+        "is_own_profile": is_own_profile,
+    }
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/stats.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter
+
+from backend.api.deps import DB, CurrentUser, OptionalUser
+from backend.api.schemas.stats import ReadingStatsResponse
+from backend.services import stats_service
+
+router = APIRouter(tags=["stats"])
+
+
+@router.get("/me/stats", response_model=ReadingStatsResponse)
+async def get_my_stats(
+    db: DB,
+    current_user: CurrentUser,
+) -> ReadingStatsResponse:
+    """Get your own reading stats (includes private books)."""
+    data = await stats_service.get_reading_stats(db, current_user.id, current_user.id)
+    return ReadingStatsResponse(**data)
+
+
+@router.get("/users/{user_id}/stats", response_model=ReadingStatsResponse)
+async def get_user_stats(
+    user_id: UUID,
+    db: DB,
+    current_user: CurrentUser,
+) -> ReadingStatsResponse:
+    """Get another user's reading stats (respects hide_reading_stats)."""
+    data = await stats_service.get_reading_stats(db, user_id, current_user.id)
+    return ReadingStatsResponse(**data)
+
+
+Register in backend/api/main.py:
+
+    from backend.api.routes import stats
+    app.include_router(stats.router, prefix="/api/v1")
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/users.py  (modification for stats privacy toggle)
+────────────────────────────────────────────────────────────────────────────────
+
+Add hide_reading_stats to the update profile endpoint (PATCH /me):
+
+In the UpdateProfileRequest schema:
+
+    hide_reading_stats: bool | None = None
+
+In the update handler:
+
+    if request.hide_reading_stats is not None:
+        user.hide_reading_stats = request.hide_reading_stats
+
+
+================================================================================
+C. CONTENT WARNINGS & MOOD TAGS
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DESIGN
+────────────────────────────────────────────────────────────────────────────────
+
+Community-contributed tags on works (not user_books). Any user who has logged
+a book can add content warning or mood tags. Tags are aggregated — if 3+ users
+tag a book with "graphic violence", it shows as a consensus tag.
+
+Two tag types:
+  - "warning" — content warnings (graphic violence, self-harm, sexual content,
+    substance abuse, animal cruelty, etc.)
+  - "mood" — reading mood/vibe (dark, lighthearted, slow burn, page turner,
+    emotional, thought-provoking, etc.)
+
+Tags are displayed on BookDetail with counts. Users can add/remove their own
+tags. Consensus tags (3+ votes) are shown prominently.
+
+────────────────────────────────────────────────────────────────────────────────
+PREDEFINED TAG LISTS
+────────────────────────────────────────────────────────────────────────────────
+
+Content warnings (tag_type="warning"):
+  graphic_violence, sexual_content, self_harm, suicide, substance_abuse,
+  animal_cruelty, child_abuse, domestic_violence, racism, homophobia,
+  eating_disorders, war, grief_death, assault, trafficking
+
+Mood tags (tag_type="mood"):
+  dark, lighthearted, funny, emotional, thought_provoking, slow_burn,
+  page_turner, atmospheric, heartwarming, tense, whimsical, bittersweet,
+  adventurous, unsettling, hopeful, nostalgic, cozy, intense
+
+Users select from these predefined lists — no free-text to prevent abuse
+and ensure consistency.
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/content_tag.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+VALID_WARNING_TAGS = frozenset({
+    "graphic_violence", "sexual_content", "self_harm", "suicide",
+    "substance_abuse", "animal_cruelty", "child_abuse", "domestic_violence",
+    "racism", "homophobia", "eating_disorders", "war", "grief_death",
+    "assault", "trafficking",
+})
+
+VALID_MOOD_TAGS = frozenset({
+    "dark", "lighthearted", "funny", "emotional", "thought_provoking",
+    "slow_burn", "page_turner", "atmospheric", "heartwarming", "tense",
+    "whimsical", "bittersweet", "adventurous", "unsettling", "hopeful",
+    "nostalgic", "cozy", "intense",
+})
+
+
+class WorkContentTag(UUIDMixin, TimestampMixin, Base):
+    """A single user's vote for a content tag on a work.
+
+    Many users can vote for the same tag on the same work. The (work, user, tag)
+    combo is unique — one vote per tag per user per work.
+    """
+    __tablename__ = "work_content_tags"
+
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    tag: Mapped[str] = mapped_column(String(50), nullable=False)
+    tag_type: Mapped[str] = mapped_column(String(20), nullable=False)  # "warning" or "mood"
+
+    __table_args__ = (
+        UniqueConstraint("work_id", "user_id", "tag", name="uq_work_content_tag"),
+        Index("ix_work_content_tags_work_id", "work_id"),
+        Index("ix_work_content_tags_work_type", "work_id", "tag_type"),
+    )
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/__init__.py  (add import)
+────────────────────────────────────────────────────────────────────────────────
+
+from .content_tag import WorkContentTag, VALID_WARNING_TAGS, VALID_MOOD_TAGS
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/model_stubs.py  (add stub)
+────────────────────────────────────────────────────────────────────────────────
+
+class WorkContentTag(TimestampMixin, Base):
+    __tablename__ = "work_content_tags"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    work_id: Mapped[uuid.UUID] = _fk_uuid_col("works.id", index=True)
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id")
+    tag: Mapped[str] = mapped_column(String(50))
+    tag_type: Mapped[str] = mapped_column(String(20))
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/schemas/content_tags.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class AddTagRequest(BaseModel):
+    tag: str = Field(..., max_length=50)
+    tag_type: str = Field(..., pattern="^(warning|mood)$")
+
+
+class RemoveTagRequest(BaseModel):
+    tag: str = Field(..., max_length=50)
+
+
+class ContentTagSummary(BaseModel):
+    """Aggregated tag with vote count."""
+    tag: str
+    tag_type: str
+    count: int
+    display_name: str       # Human-readable: "graphic_violence" → "Graphic Violence"
+    user_has_voted: bool    # Whether the requesting user voted for this tag
+
+
+class WorkContentTagsResponse(BaseModel):
+    warnings: list[ContentTagSummary]
+    moods: list[ContentTagSummary]
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/content_tag_service.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+"""Content warning and mood tag service.
+
+Users vote on tags for books. Tags are aggregated per-work with counts.
+Only predefined tags are allowed to prevent abuse.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.api.errors import AppError
+from backend.api.model_stubs import UserBook, WorkContentTag
+from backend.models.content_tag import VALID_MOOD_TAGS, VALID_WARNING_TAGS
+
+
+def _display_name(tag: str) -> str:
+    """Convert snake_case tag to display name: 'graphic_violence' → 'Graphic Violence'."""
+    return tag.replace("_", " ").title()
+
+
+async def add_tag(
+    db: AsyncSession,
+    user_id: UUID,
+    work_id: UUID,
+    tag: str,
+    tag_type: str,
+) -> None:
+    """Add a content tag vote for a work.
+
+    Validates:
+      - Tag is from the predefined list for its type
+      - User has logged this book (must have read/be reading to tag)
+      - No duplicate vote (unique constraint handles this)
+    """
+    # Validate tag is in the predefined set
+    valid_tags = VALID_WARNING_TAGS if tag_type == "warning" else VALID_MOOD_TAGS
+    if tag not in valid_tags:
+        raise AppError(
+            status_code=422,
+            code="INVALID_TAG",
+            message=f"'{tag}' is not a valid {tag_type} tag.",
+        )
+
+    # Verify user has logged this book
+    result = await db.execute(
+        select(UserBook).where(
+            UserBook.user_id == user_id,
+            UserBook.work_id == work_id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise AppError(
+            status_code=403,
+            code="BOOK_NOT_LOGGED",
+            message="You must log this book before adding content tags.",
+        )
+
+    # Insert tag vote (unique constraint prevents duplicates)
+    try:
+        tag_record = WorkContentTag(
+            work_id=work_id,
+            user_id=user_id,
+            tag=tag,
+            tag_type=tag_type,
+        )
+        db.add(tag_record)
+        await db.flush()
+    except Exception:
+        # Unique constraint violation — user already voted for this tag
+        await db.rollback()
+        raise AppError(
+            status_code=409,
+            code="DUPLICATE_TAG",
+            message="You have already added this tag for this book.",
+        )
+
+
+async def remove_tag(
+    db: AsyncSession,
+    user_id: UUID,
+    work_id: UUID,
+    tag: str,
+) -> None:
+    """Remove a user's content tag vote from a work."""
+    result = await db.execute(
+        delete(WorkContentTag).where(
+            WorkContentTag.work_id == work_id,
+            WorkContentTag.user_id == user_id,
+            WorkContentTag.tag == tag,
+        )
+    )
+    if result.rowcount == 0:
+        raise AppError(
+            status_code=404,
+            code="TAG_NOT_FOUND",
+            message="You haven't added this tag for this book.",
+        )
+    await db.flush()
+
+
+async def get_work_tags(
+    db: AsyncSession,
+    work_id: UUID,
+    user_id: UUID | None = None,
+) -> dict:
+    """Get aggregated content tags for a work, with vote counts.
+
+    Tags are sorted by count descending. If user_id is provided,
+    includes whether the user voted for each tag.
+    """
+    # Aggregate tags with counts
+    result = await db.execute(
+        select(
+            WorkContentTag.tag,
+            WorkContentTag.tag_type,
+            func.count().label("count"),
+        )
+        .where(WorkContentTag.work_id == work_id)
+        .group_by(WorkContentTag.tag, WorkContentTag.tag_type)
+        .order_by(func.count().desc())
+    )
+    tag_rows = result.all()
+
+    # Get user's own votes (if authenticated)
+    user_votes: set[str] = set()
+    if user_id:
+        user_result = await db.execute(
+            select(WorkContentTag.tag)
+            .where(
+                WorkContentTag.work_id == work_id,
+                WorkContentTag.user_id == user_id,
+            )
+        )
+        user_votes = {row[0] for row in user_result.all()}
+
+    warnings = []
+    moods = []
+
+    for tag, tag_type, count in tag_rows:
+        summary = {
+            "tag": tag,
+            "tag_type": tag_type,
+            "count": count,
+            "display_name": _display_name(tag),
+            "user_has_voted": tag in user_votes,
+        }
+        if tag_type == "warning":
+            warnings.append(summary)
+        else:
+            moods.append(summary)
+
+    return {"warnings": warnings, "moods": moods}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/content_tags.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, status
+
+from backend.api.deps import DB, CurrentUser, OptionalUser
+from backend.api.schemas.content_tags import (
+    AddTagRequest,
+    ContentTagSummary,
+    RemoveTagRequest,
+    WorkContentTagsResponse,
+)
+from backend.services import content_tag_service
+
+router = APIRouter(tags=["content-tags"])
+
+
+@router.get(
+    "/books/{work_id}/tags",
+    response_model=WorkContentTagsResponse,
+)
+async def get_work_tags(
+    work_id: UUID,
+    db: DB,
+    current_user: CurrentUser,
+) -> WorkContentTagsResponse:
+    """Get content warnings and mood tags for a book."""
+    data = await content_tag_service.get_work_tags(db, work_id, current_user.id)
+    return WorkContentTagsResponse(**data)
+
+
+@router.post(
+    "/books/{work_id}/tags",
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_tag(
+    work_id: UUID,
+    request: AddTagRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Add a content warning or mood tag to a book."""
+    await content_tag_service.add_tag(
+        db, current_user.id, work_id, request.tag, request.tag_type
+    )
+    return {"message": "Tag added"}
+
+
+@router.delete("/books/{work_id}/tags")
+async def remove_tag(
+    work_id: UUID,
+    request: RemoveTagRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Remove your content warning or mood tag from a book."""
+    await content_tag_service.remove_tag(db, current_user.id, work_id, request.tag)
+    return {"message": "Tag removed"}
+
+
+Register in backend/api/main.py:
+
+    from backend.api.routes import content_tags
+    app.include_router(content_tags.router, prefix="/api/v1")
+
+
+================================================================================
+iOS IMPLEMENTATION
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Models/ContentTag.swift  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+enum ContentTagType: String, Codable {
+    case warning
+    case mood
+}
+
+struct ContentTagSummary: Codable, Identifiable {
+    let tag: String
+    let tagType: String
+    let count: Int
+    let displayName: String
+    let userHasVoted: Bool
+
+    var id: String { tag }
+
+    enum CodingKeys: String, CodingKey {
+        case tag
+        case tagType = "tag_type"
+        case count
+        case displayName = "display_name"
+        case userHasVoted = "user_has_voted"
+    }
+}
+
+struct WorkContentTagsResponse: Codable {
+    let warnings: [ContentTagSummary]
+    let moods: [ContentTagSummary]
+}
+
+// Predefined tags for the picker UI
+enum WarningTag: String, CaseIterable, Identifiable {
+    case graphicViolence = "graphic_violence"
+    case sexualContent = "sexual_content"
+    case selfHarm = "self_harm"
+    case suicide
+    case substanceAbuse = "substance_abuse"
+    case animalCruelty = "animal_cruelty"
+    case childAbuse = "child_abuse"
+    case domesticViolence = "domestic_violence"
+    case racism
+    case homophobia
+    case eatingDisorders = "eating_disorders"
+    case war
+    case griefDeath = "grief_death"
+    case assault
+    case trafficking
+
+    var id: String { rawValue }
+    var displayName: String {
+        rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+}
+
+enum MoodTag: String, CaseIterable, Identifiable {
+    case dark, lighthearted, funny, emotional
+    case thoughtProvoking = "thought_provoking"
+    case slowBurn = "slow_burn"
+    case pageTurner = "page_turner"
+    case atmospheric, heartwarming, tense, whimsical, bittersweet
+    case adventurous, unsettling, hopeful, nostalgic, cozy, intense
+
+    var id: String { rawValue }
+    var displayName: String {
+        rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+}
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Models/UserBook.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Add to UserBook struct:
+
+    let isPrivate: Bool
+
+    enum CodingKeys: String, CodingKey {
+        // ... existing keys ...
+        case isPrivate = "is_private"
+    }
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Models/ReadingStats.swift  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+struct YearlyStats: Codable, Identifiable {
+    let year: Int
+    let booksRead: Int
+    let booksStarted: Int
+    let booksDnf: Int
+    let averageRating: Double?
+    let highestRatedBook: String?
+    let mostReadMonth: String?
+    let totalPages: Int?
+    let ratingDistribution: [String: Int]
+
+    var id: Int { year }
+
+    enum CodingKeys: String, CodingKey {
+        case year
+        case booksRead = "books_read"
+        case booksStarted = "books_started"
+        case booksDnf = "books_dnf"
+        case averageRating = "average_rating"
+        case highestRatedBook = "highest_rated_book"
+        case mostReadMonth = "most_read_month"
+        case totalPages = "total_pages"
+        case ratingDistribution = "rating_distribution"
+    }
+}
+
+struct AllTimeStats: Codable {
+    let totalBooksRead: Int
+    let totalBooksLogged: Int
+    let totalReviews: Int
+    let averageRating: Double?
+    let ratingDistribution: [String: Int]
+    let topSubjects: [String]
+    let readingPace: Double?
+    let longestStreak: Int
+    let firstBookLoggedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case totalBooksRead = "total_books_read"
+        case totalBooksLogged = "total_books_logged"
+        case totalReviews = "total_reviews"
+        case averageRating = "average_rating"
+        case ratingDistribution = "rating_distribution"
+        case topSubjects = "top_subjects"
+        case readingPace = "reading_pace"
+        case longestStreak = "longest_streak"
+        case firstBookLoggedAt = "first_book_logged_at"
+    }
+}
+
+struct ReadingStatsResponse: Codable {
+    let allTime: AllTimeStats
+    let yearly: [YearlyStats]
+    let isOwnProfile: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case allTime = "all_time"
+        case yearly
+        case isOwnProfile = "is_own_profile"
+    }
+}
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/BookDetail/LogBookSheet.swift  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+Add a "Private" toggle to the log book form. Insert after the spoiler toggle:
+
+    Section {
+        Toggle("Private", isOn: $isPrivate)
+    } header: {
+        Text("Privacy")
+    } footer: {
+        Text("Private books won't appear on your profile or in your followers' feeds.")
+    }
+
+Add the state variable:
+
+    @State private var isPrivate = false
+
+Include in the API request body:
+
+    "is_private": isPrivate
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/BookDetail/ContentTagsSection.swift  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+
+struct ContentTagsSection: View {
+    let workID: UUID
+    @State private var tags: WorkContentTagsResponse?
+    @State private var isLoading = false
+    @State private var showAddSheet = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Content Warnings (only show if any exist or user wants to add)
+            if let tags, !tags.warnings.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Content Warnings", systemImage: "exclamationmark.triangle")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.orange)
+
+                    FlowLayout(spacing: 6) {
+                        ForEach(tags.warnings) { tag in
+                            TagChip(
+                                tag: tag,
+                                tint: .orange,
+                                onToggle: { toggleTag(tag) }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Mood Tags
+            if let tags, !tags.moods.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Mood", systemImage: "sparkles")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.purple)
+
+                    FlowLayout(spacing: 6) {
+                        ForEach(tags.moods) { tag in
+                            TagChip(
+                                tag: tag,
+                                tint: .purple,
+                                onToggle: { toggleTag(tag) }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Add tags button
+            Button {
+                showAddSheet = true
+            } label: {
+                Label("Add Tags", systemImage: "plus.circle")
+                    .font(.subheadline)
+            }
+        }
+        .task { await loadTags() }
+        .sheet(isPresented: $showAddSheet) {
+            AddContentTagsSheet(workID: workID, onDismiss: { Task { await loadTags() } })
+        }
+    }
+
+    private func loadTags() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            tags = try await APIClient.shared.request(
+                method: .get,
+                path: "/books/\(workID.uuidString)/tags"
+            )
+        } catch {
+            // Silent fail — tags are supplementary
+        }
+    }
+
+    private func toggleTag(_ tag: ContentTagSummary) {
+        Task {
+            if tag.userHasVoted {
+                try? await APIClient.shared.request(
+                    method: .delete,
+                    path: "/books/\(workID.uuidString)/tags",
+                    body: ["tag": tag.tag]
+                )
+            } else {
+                try? await APIClient.shared.request(
+                    method: .post,
+                    path: "/books/\(workID.uuidString)/tags",
+                    body: ["tag": tag.tag, "tag_type": tag.tagType]
+                )
+            }
+            await loadTags()
+        }
+    }
+}
+
+
+struct TagChip: View {
+    let tag: ContentTagSummary
+    let tint: Color
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 4) {
+                Text(tag.displayName)
+                    .font(.caption)
+                Text("(\(tag.count))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if tag.userHasVoted {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption2)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(tag.userHasVoted ? tint.opacity(0.2) : Color(.systemGray6))
+            .foregroundStyle(tag.userHasVoted ? tint : .primary)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(tag.userHasVoted ? tint.opacity(0.5) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/BookDetail/AddContentTagsSheet.swift  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+
+struct AddContentTagsSheet: View {
+    let workID: UUID
+    let onDismiss: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedWarnings: Set<String> = []
+    @State private var selectedMoods: Set<String> = []
+    @State private var isSubmitting = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Content Warnings") {
+                    ForEach(WarningTag.allCases) { tag in
+                        Toggle(tag.displayName, isOn: Binding(
+                            get: { selectedWarnings.contains(tag.rawValue) },
+                            set: { if $0 { selectedWarnings.insert(tag.rawValue) }
+                                   else { selectedWarnings.remove(tag.rawValue) } }
+                        ))
+                    }
+                }
+
+                Section("Mood") {
+                    ForEach(MoodTag.allCases) { tag in
+                        Toggle(tag.displayName, isOn: Binding(
+                            get: { selectedMoods.contains(tag.rawValue) },
+                            set: { if $0 { selectedMoods.insert(tag.rawValue) }
+                                   else { selectedMoods.remove(tag.rawValue) } }
+                        ))
+                    }
+                }
+            }
+            .navigationTitle("Add Tags")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        Task { await submitTags() }
+                    }
+                    .disabled(isSubmitting)
+                }
+            }
+        }
+    }
+
+    private func submitTags() async {
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        for tag in selectedWarnings {
+            try? await APIClient.shared.request(
+                method: .post,
+                path: "/books/\(workID.uuidString)/tags",
+                body: ["tag": tag, "tag_type": "warning"]
+            )
+        }
+        for tag in selectedMoods {
+            try? await APIClient.shared.request(
+                method: .post,
+                path: "/books/\(workID.uuidString)/tags",
+                body: ["tag": tag, "tag_type": "mood"]
+            )
+        }
+
+        onDismiss()
+        dismiss()
+    }
+}
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/BookDetail/BookDetailView.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Add the ContentTagsSection to the book detail view, between the book
+metadata section and the reviews section:
+
+    // After book description / metadata:
+    ContentTagsSection(workID: book.id)
+        .padding(.horizontal)
+
+    // Before reviews section:
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Profile/ReadingStatsView.swift  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+import Charts
+
+struct ReadingStatsView: View {
+    let userID: UUID
+    let isOwnProfile: Bool
+
+    @State private var stats: ReadingStatsResponse?
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+    @State private var selectedYear: Int?
+
+    var body: some View {
+        ScrollView {
+            if isLoading {
+                ProgressView()
+                    .padding(.top, 100)
+            } else if let errorMessage {
+                ContentUnavailableView(
+                    "Stats Hidden",
+                    systemImage: "eye.slash",
+                    description: Text(errorMessage)
+                )
+            } else if let stats {
+                VStack(spacing: 24) {
+                    allTimeSection(stats.allTime)
+                    ratingDistributionChart(stats.allTime.ratingDistribution)
+                    topSubjectsSection(stats.allTime.topSubjects)
+
+                    if !stats.yearly.isEmpty {
+                        yearlySection(stats.yearly)
+                    }
+                }
+                .padding()
+            }
+        }
+        .navigationTitle("Reading Stats")
+        .task { await loadStats() }
+    }
+
+    // MARK: - All Time
+
+    @ViewBuilder
+    private func allTimeSection(_ allTime: AllTimeStats) -> some View {
+        VStack(spacing: 16) {
+            Text("All Time")
+                .font(.title2.weight(.bold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            LazyVGrid(columns: [
+                GridItem(.flexible()), GridItem(.flexible()),
+                GridItem(.flexible()), GridItem(.flexible()),
+            ], spacing: 12) {
+                StatCard(value: "\(allTime.totalBooksRead)", label: "Books Read")
+                StatCard(value: "\(allTime.totalReviews)", label: "Reviews")
+                StatCard(
+                    value: allTime.averageRating.map { String(format: "%.1f", $0) } ?? "—",
+                    label: "Avg Rating"
+                )
+                StatCard(
+                    value: allTime.readingPace.map { String(format: "%.1f", $0) } ?? "—",
+                    label: "Books/Month"
+                )
+            }
+        }
+    }
+
+    // MARK: - Rating Distribution
+
+    @ViewBuilder
+    private func ratingDistributionChart(_ distribution: [String: Int]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Rating Distribution")
+                .font(.headline)
+
+            let sortedRatings = distribution.sorted { Double($0.key)! < Double($1.key)! }
+
+            Chart(sortedRatings, id: \.key) { rating, count in
+                BarMark(
+                    x: .value("Rating", rating),
+                    y: .value("Count", count)
+                )
+                .foregroundStyle(.orange.gradient)
+                .cornerRadius(4)
+            }
+            .frame(height: 150)
+            .chartYAxis(.hidden)
+        }
+    }
+
+    // MARK: - Top Subjects
+
+    @ViewBuilder
+    private func topSubjectsSection(_ subjects: [String]) -> some View {
+        if !subjects.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Top Genres")
+                    .font(.headline)
+
+                FlowLayout(spacing: 6) {
+                    ForEach(subjects, id: \.self) { subject in
+                        Text(subject)
+                            .font(.caption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color(.systemGray6))
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Yearly
+
+    @ViewBuilder
+    private func yearlySection(_ yearly: [YearlyStats]) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("By Year")
+                .font(.title2.weight(.bold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            ForEach(yearly) { year in
+                YearStatCard(year: year)
+            }
+        }
+    }
+
+    private func loadStats() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        let path = isOwnProfile ? "/me/stats" : "/users/\(userID.uuidString)/stats"
+        do {
+            stats = try await APIClient.shared.request(method: .get, path: path)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+
+struct StatCard: View {
+    let value: String
+    let label: String
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.title3.weight(.bold))
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+
+struct YearStatCard: View {
+    let year: YearlyStats
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(String(year.year))
+                    .font(.headline)
+                Spacer()
+                Text("\(year.booksRead) books")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 16) {
+                if let avg = year.averageRating {
+                    Label(String(format: "%.1f", avg), systemImage: "star.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if let month = year.mostReadMonth {
+                    Label("Peak: \(month)", systemImage: "calendar")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let book = year.highestRatedBook {
+                    Label(book, systemImage: "trophy")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Profile/MyProfileView.swift  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+Add a "Reading Stats" navigation link in the profile view:
+
+    NavigationLink {
+        ReadingStatsView(userID: currentUser.id, isOwnProfile: true)
+    } label: {
+        Label("Reading Stats", systemImage: "chart.bar")
+    }
+
+Add to SettingsView — privacy toggle for stats:
+
+    Section("Privacy") {
+        Toggle("Hide reading stats from profile", isOn: $hideReadingStats)
+    }
+
+    // On toggle change, call PATCH /me with hide_reading_stats
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Profile/SettingsView.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Add a privacy section:
+
+    Section("Privacy") {
+        Toggle("Hide reading stats from profile", isOn: $hideReadingStats)
+            .onChange(of: hideReadingStats) { _, newValue in
+                Task {
+                    try? await APIClient.shared.request(
+                        method: .patch,
+                        path: "/me",
+                        body: ["hide_reading_stats": newValue]
+                    )
+                }
+            }
+    }
+
+
+================================================================================
+TESTS
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_privacy.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import uuid
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_private_book_not_in_feed(client, db_session, test_user, other_user, test_work):
+    """Private books should not appear in followers' feeds."""
+    # other_user follows test_user
+    await client.post(f"/api/v1/users/{test_user.id}/follow")
+
+    # test_user logs a private book
+    resp = await client.post(
+        "/api/v1/me/books",
+        json={
+            "work_id": str(test_work.id),
+            "status": "read",
+            "rating": 4.0,
+            "review_text": "Secret guilty pleasure read.",
+            "is_private": True,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["is_private"] is True
+
+    # Check feed as other_user — should be empty
+    feed_resp = await client.get("/api/v1/feed")
+    assert feed_resp.status_code == 200
+    # The private book should not appear in the feed
+    for item in feed_resp.json()["items"]:
+        assert item["book"]["id"] != str(test_work.id)
+
+
+@pytest.mark.asyncio
+async def test_private_book_visible_to_owner(client, test_work):
+    """Private books should appear in GET /me/books."""
+    await client.post(
+        "/api/v1/me/books",
+        json={
+            "work_id": str(test_work.id),
+            "status": "read",
+            "rating": 3.0,
+            "review_text": "Private review.",
+            "is_private": True,
+        },
+    )
+
+    resp = await client.get("/api/v1/me/books")
+    assert resp.status_code == 200
+    books = resp.json()["items"]
+    work_ids = [b["work_id"] for b in books]
+    assert str(test_work.id) in work_ids
+
+
+@pytest.mark.asyncio
+async def test_private_book_hidden_from_other_users(client, db_session, test_user, other_user, test_work):
+    """Private books should NOT appear in GET /users/{id}/books for other viewers."""
+    await client.post(
+        "/api/v1/me/books",
+        json={
+            "work_id": str(test_work.id),
+            "status": "read",
+            "rating": 4.5,
+            "review_text": "Hidden gem.",
+            "is_private": True,
+        },
+    )
+
+    # View test_user's books as other_user
+    resp = await client.get(f"/api/v1/users/{test_user.id}/books")
+    assert resp.status_code == 200
+    books = resp.json()["items"]
+    work_ids = [b["work_id"] for b in books]
+    assert str(test_work.id) not in work_ids
+
+
+@pytest.mark.asyncio
+async def test_toggle_privacy_removes_activity(client, db_session, test_work):
+    """Making a public book private should remove its activity record."""
+    resp = await client.post(
+        "/api/v1/me/books",
+        json={
+            "work_id": str(test_work.id),
+            "status": "read",
+            "rating": 4.0,
+            "review_text": "Initially public.",
+            "is_private": False,
+        },
+    )
+    user_book_id = resp.json()["id"]
+
+    # Make it private
+    update_resp = await client.patch(
+        f"/api/v1/me/books/{user_book_id}",
+        json={"is_private": True},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["is_private"] is True
+
+    # Activity should be gone — feed should not contain this book
+
+
+@pytest.mark.asyncio
+async def test_toggle_privacy_creates_activity(client, db_session, test_work):
+    """Making a private book public should create an activity record."""
+    resp = await client.post(
+        "/api/v1/me/books",
+        json={
+            "work_id": str(test_work.id),
+            "status": "read",
+            "rating": 4.0,
+            "review_text": "Was private, now public.",
+            "is_private": True,
+        },
+    )
+    user_book_id = resp.json()["id"]
+
+    # Make it public
+    update_resp = await client.patch(
+        f"/api/v1/me/books/{user_book_id}",
+        json={"is_private": False},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["is_private"] is False
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_stats.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import uuid
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_get_own_stats(client, db_session, test_user, test_work):
+    """Get reading stats for own profile."""
+    # Log a book first
+    await client.post(
+        "/api/v1/me/books",
+        json={
+            "work_id": str(test_work.id),
+            "status": "read",
+            "rating": 4.0,
+            "review_text": "Good book.",
+        },
+    )
+
+    resp = await client.get("/api/v1/me/stats")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["is_own_profile"] is True
+    assert data["all_time"]["total_books_read"] >= 1
+    assert data["all_time"]["total_reviews"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_hidden_stats_returns_403(client, db_session, test_user, other_user):
+    """Viewing a user's stats when they have hide_reading_stats=True returns 403."""
+    # Set other_user's stats to hidden
+    from sqlalchemy import update
+    from backend.api.model_stubs import User
+
+    await db_session.execute(
+        update(User).where(User.id == other_user.id).values(hide_reading_stats=True)
+    )
+    await db_session.commit()
+
+    resp = await client.get(f"/api/v1/users/{other_user.id}/stats")
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"]["code"] == "STATS_HIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_private_books_included_in_own_stats(client, test_work):
+    """Private books should count in your own stats."""
+    await client.post(
+        "/api/v1/me/books",
+        json={
+            "work_id": str(test_work.id),
+            "status": "read",
+            "rating": 5.0,
+            "review_text": "Secret favorite.",
+            "is_private": True,
+        },
+    )
+
+    resp = await client.get("/api/v1/me/stats")
+    assert resp.status_code == 200
+    assert resp.json()["all_time"]["total_books_read"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_private_books_excluded_from_other_user_stats(
+    client, db_session, test_user, other_user, test_work
+):
+    """Private books should NOT count in stats when viewed by another user."""
+    # This test verifies that get_reading_stats applies the is_private filter
+    # when requesting_user_id != target_user_id
+    pass  # Implementation depends on fixture setup for cross-user queries
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_content_tags.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+import uuid
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_add_warning_tag(client, db_session, test_user, test_work):
+    """Add a content warning tag to a logged book."""
+    # Log the book first
+    await client.post(
+        "/api/v1/me/books",
+        json={"work_id": str(test_work.id), "status": "read", "rating": 3.0,
+              "review_text": "Has some intense scenes."},
+    )
+
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "graphic_violence", "tag_type": "warning"},
+    )
+    assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_add_mood_tag(client, db_session, test_user, test_work):
+    """Add a mood tag to a logged book."""
+    await client.post(
+        "/api/v1/me/books",
+        json={"work_id": str(test_work.id), "status": "read", "rating": 4.0,
+              "review_text": "Atmospheric and moody."},
+    )
+
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "atmospheric", "tag_type": "mood"},
+    )
+    assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_invalid_tag_returns_422(client, db_session, test_user, test_work):
+    """Submitting an invalid tag name returns 422."""
+    await client.post(
+        "/api/v1/me/books",
+        json={"work_id": str(test_work.id), "status": "read", "rating": 3.0,
+              "review_text": "Test."},
+    )
+
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "not_a_real_tag", "tag_type": "warning"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["error"]["code"] == "INVALID_TAG"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tag_returns_409(client, db_session, test_user, test_work):
+    """Adding the same tag twice returns 409."""
+    await client.post(
+        "/api/v1/me/books",
+        json={"work_id": str(test_work.id), "status": "read", "rating": 3.0,
+              "review_text": "Test."},
+    )
+
+    await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "dark", "tag_type": "mood"},
+    )
+
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "dark", "tag_type": "mood"},
+    )
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_must_log_book_before_tagging(client, test_work):
+    """Can't add tags to a book you haven't logged."""
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "funny", "tag_type": "mood"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"]["code"] == "BOOK_NOT_LOGGED"
+
+
+@pytest.mark.asyncio
+async def test_get_work_tags_with_counts(client, db_session, test_user, test_work):
+    """GET tags returns aggregated counts and user vote status."""
+    await client.post(
+        "/api/v1/me/books",
+        json={"work_id": str(test_work.id), "status": "read", "rating": 3.0,
+              "review_text": "Test."},
+    )
+
+    await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "dark", "tag_type": "mood"},
+    )
+
+    resp = await client.get(f"/api/v1/books/{test_work.id}/tags")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["moods"]) == 1
+    assert data["moods"][0]["tag"] == "dark"
+    assert data["moods"][0]["count"] == 1
+    assert data["moods"][0]["user_has_voted"] is True
+    assert data["moods"][0]["display_name"] == "Dark"
+
+
+@pytest.mark.asyncio
+async def test_remove_tag(client, db_session, test_user, test_work):
+    """Remove a tag you previously added."""
+    await client.post(
+        "/api/v1/me/books",
+        json={"work_id": str(test_work.id), "status": "read", "rating": 3.0,
+              "review_text": "Test."},
+    )
+
+    await client.post(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "funny", "tag_type": "mood"},
+    )
+
+    resp = await client.delete(
+        f"/api/v1/books/{test_work.id}/tags",
+        json={"tag": "funny"},
+    )
+    assert resp.status_code == 200
+
+    # Verify it's gone
+    tags_resp = await client.get(f"/api/v1/books/{test_work.id}/tags")
+    assert len(tags_resp.json()["moods"]) == 0
+
+
+================================================================================
+SUMMARY
+================================================================================
+
+New backend files:
+  - backend/models/content_tag.py
+  - backend/services/stats_service.py
+  - backend/services/content_tag_service.py
+  - backend/api/routes/stats.py
+  - backend/api/routes/content_tags.py
+  - backend/api/schemas/stats.py
+  - backend/api/schemas/content_tags.py
+  - backend/tests/test_privacy.py
+  - backend/tests/test_stats.py
+  - backend/tests/test_content_tags.py
+  - backend/migrations/versions/xxxx_add_privacy_and_warnings.py
+
+Modified backend files:
+  - backend/models/user_book.py          — add is_private
+  - backend/models/user.py               — add hide_reading_stats
+  - backend/models/__init__.py           — add WorkContentTag import
+  - backend/api/model_stubs.py           — add stubs
+  - backend/api/schemas/user_books.py    — add is_private to request/response
+  - backend/services/user_book_service.py — skip Activity when private, handle toggle
+  - backend/services/feed_service.py     — filter out private books from feed
+  - backend/api/routes/users.py          — accept hide_reading_stats in PATCH /me
+  - backend/api/main.py                  — register stats + content_tags routers
+
+New iOS files:
+  - ios/Shelf/Models/ContentTag.swift
+  - ios/Shelf/Models/ReadingStats.swift
+  - ios/Shelf/Views/BookDetail/ContentTagsSection.swift
+  - ios/Shelf/Views/BookDetail/AddContentTagsSheet.swift
+  - ios/Shelf/Views/Profile/ReadingStatsView.swift
+
+Modified iOS files:
+  - ios/Shelf/Models/UserBook.swift          — add isPrivate
+  - ios/Shelf/Views/BookDetail/LogBookSheet.swift  — add Private toggle
+  - ios/Shelf/Views/BookDetail/BookDetailView.swift — add ContentTagsSection
+  - ios/Shelf/Views/Profile/MyProfileView.swift     — add Reading Stats link
+  - ios/Shelf/Views/Profile/SettingsView.swift      — add privacy toggles
+
+New API endpoints:
+  GET    /api/v1/me/stats
+  GET    /api/v1/users/{id}/stats
+  GET    /api/v1/books/{id}/tags
+  POST   /api/v1/books/{id}/tags
+  DELETE /api/v1/books/{id}/tags

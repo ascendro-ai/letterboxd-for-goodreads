@@ -1,0 +1,770 @@
+================================================================================
+23 — iOS Test Coverage
+Comprehensive XCTest suite for the Shelf iOS app
+================================================================================
+
+Current state: ios/ShelfTests/ShelfTests.swift exists but has nearly zero
+meaningful test coverage. The app has 14 services, 6 view models, 20+ views,
+and 10+ models — all untested.
+
+Strategy: Focus on testable layers first (models, services, view models),
+mock the network layer, and add UI tests for critical flows.
+
+================================================================================
+TEST ARCHITECTURE
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+Directory structure:
+────────────────────────────────────────────────────────────────────────────────
+
+ios/ShelfTests/
+├── Mocks/
+│   ├── MockAPIClient.swift           # Pluggable mock for all API calls
+│   ├── MockAuthService.swift         # Pre-authenticated test state
+│   └── MockData.swift                # Factory methods for test fixtures
+├── Models/
+│   ├── BookTests.swift               # Codable decode/encode
+│   ├── UserTests.swift
+│   ├── UserBookTests.swift
+│   ├── ShelfModelTests.swift
+│   ├── FeedTests.swift
+│   └── ModerationTests.swift
+├── Services/
+│   ├── APIClientTests.swift          # URL construction, headers, error handling
+│   ├── BookServiceTests.swift        # Search, detail, ISBN lookup
+│   ├── UserBookServiceTests.swift    # Log, rate, review
+│   ├── ShelfServiceTests.swift       # CRUD operations
+│   ├── SocialServiceTests.swift      # Follow, block, mute
+│   ├── FeedServiceTests.swift        # Feed pagination
+│   ├── ImportServiceTests.swift      # CSV upload, status polling
+│   ├── OfflineStoreTests.swift       # SwiftData operations
+│   └── SyncServiceTests.swift        # Mutation queue replay
+├── ViewModels/
+│   ├── SearchViewModelTests.swift    # Search debounce, results
+│   ├── BookDetailViewModelTests.swift# Load, log, review
+│   ├── FeedViewModelTests.swift      # Load, pagination, refresh
+│   ├── ProfileViewModelTests.swift   # Load, edit, stats
+│   └── ImportViewModelTests.swift    # Upload, progress, completion
+└── Integration/
+    └── OfflineSyncIntegrationTests.swift
+
+
+================================================================================
+FILE: ios/ShelfTests/Mocks/MockAPIClient.swift
+================================================================================
+
+import Foundation
+@testable import Shelf
+
+/// Protocol-based mock that replaces APIClient for testing.
+/// Each service method maps to a closure that tests can override.
+final class MockAPIClient {
+    /// Map of (method, path) → response data
+    var responses: [String: Any] = [:]
+    var requestLog: [(method: String, path: String, body: Any?)] = []
+
+    /// Register a mock response for a given path
+    func register<T: Codable>(path: String, response: T) {
+        responses[path] = response
+    }
+
+    /// Register an error for a given path
+    func registerError(path: String, error: Error) {
+        responses[path] = error
+    }
+
+    func request<T: Codable>(
+        method: HTTPMethod,
+        path: String,
+        body: (any Encodable)? = nil
+    ) async throws -> T {
+        requestLog.append((method: method.rawValue, path: path, body: body))
+
+        guard let response = responses[path] else {
+            throw APIError.notFound
+        }
+
+        if let error = response as? Error {
+            throw error
+        }
+
+        guard let typed = response as? T else {
+            throw APIError.decodingError
+        }
+
+        return typed
+    }
+}
+
+/// API errors for test assertions
+enum APIError: Error, Equatable {
+    case notFound
+    case unauthorized
+    case serverError(Int)
+    case decodingError
+    case networkError
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/Mocks/MockData.swift
+================================================================================
+
+import Foundation
+@testable import Shelf
+
+/// Factory methods for creating test fixtures.
+/// All IDs are deterministic for reproducible tests.
+enum MockData {
+
+    static let userID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    static let otherUserID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+    static let workID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+    static let userBookID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+    static let shelfID = UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+
+    static func makeUser(
+        id: UUID = userID,
+        username: String = "testuser",
+        displayName: String = "Test User",
+        isPremium: Bool = false
+    ) -> User {
+        User(
+            id: id,
+            username: username,
+            displayName: displayName,
+            avatarURL: nil,
+            bio: "A test user",
+            favoriteBooks: [],
+            isPremium: isPremium,
+            createdAt: Date()
+        )
+    }
+
+    static func makeBook(
+        id: UUID = workID,
+        title: String = "The Great Gatsby",
+        authors: [String] = ["F. Scott Fitzgerald"],
+        coverURL: String? = nil
+    ) -> Book {
+        Book(
+            id: id,
+            title: title,
+            authors: authors,
+            description: "A novel about the American Dream.",
+            firstPublishedYear: 1925,
+            coverImageURL: coverURL,
+            averageRating: 4.2,
+            ratingsCount: 1500,
+            subjects: ["fiction", "classics"]
+        )
+    }
+
+    static func makeUserBook(
+        id: UUID = userBookID,
+        workID: UUID = workID,
+        status: String = "read",
+        rating: Double? = 4.5,
+        reviewText: String? = "Brilliant prose.",
+        hasSpoilers: Bool = false
+    ) -> UserBook {
+        UserBook(
+            id: id,
+            workID: workID,
+            status: status,
+            rating: rating,
+            reviewText: reviewText,
+            hasSpoilers: hasSpoilers,
+            startedAt: nil,
+            finishedAt: Date(),
+            createdAt: Date()
+        )
+    }
+
+    static func makeShelf(
+        id: UUID = shelfID,
+        name: String = "Favorites",
+        isPublic: Bool = true
+    ) -> Shelf {
+        Shelf(
+            id: id,
+            name: name,
+            slug: name.lowercased(),
+            description: "My favorite books",
+            isPublic: isPublic,
+            displayOrder: 0,
+            bookCount: 5,
+            createdAt: Date()
+        )
+    }
+
+    static func makePaginatedResponse<T: Codable>(
+        items: [T],
+        hasMore: Bool = false
+    ) -> PaginatedResponse<T> {
+        PaginatedResponse(
+            items: items,
+            nextCursor: hasMore ? "eyJjcmVhdGVkX2F0IjoiMjAyNi0wMS0wMSJ9" : nil,
+            hasMore: hasMore
+        )
+    }
+
+    // JSON strings for testing Codable decoding from raw API responses
+    static let bookJSON = """
+    {
+        "id": "33333333-3333-3333-3333-333333333333",
+        "title": "The Great Gatsby",
+        "authors": ["F. Scott Fitzgerald"],
+        "description": "A novel about the American Dream.",
+        "first_published_year": 1925,
+        "cover_image_url": null,
+        "average_rating": 4.2,
+        "ratings_count": 1500,
+        "subjects": ["fiction", "classics"]
+    }
+    """
+
+    static let userJSON = """
+    {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "username": "testuser",
+        "display_name": "Test User",
+        "avatar_url": null,
+        "bio": "A test user",
+        "favorite_books": [],
+        "is_premium": false,
+        "created_at": "2026-01-01T00:00:00Z"
+    }
+    """
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/Models/BookTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class BookTests: XCTestCase {
+
+    func testDecodeBookFromJSON() throws {
+        let data = MockData.bookJSON.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let book = try decoder.decode(Book.self, from: data)
+
+        XCTAssertEqual(book.id, MockData.workID)
+        XCTAssertEqual(book.title, "The Great Gatsby")
+        XCTAssertEqual(book.authors, ["F. Scott Fitzgerald"])
+        XCTAssertEqual(book.firstPublishedYear, 1925)
+        XCTAssertEqual(book.averageRating, 4.2, accuracy: 0.01)
+        XCTAssertEqual(book.ratingsCount, 1500)
+        XCTAssertNil(book.coverImageURL)
+    }
+
+    func testDecodeBookWithCoverURL() throws {
+        let json = """
+        {
+            "id": "33333333-3333-3333-3333-333333333333",
+            "title": "Test Book",
+            "authors": ["Author"],
+            "description": null,
+            "first_published_year": null,
+            "cover_image_url": "https://covers.shelf.app/thumb/abc.webp",
+            "average_rating": null,
+            "ratings_count": 0,
+            "subjects": []
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let book = try decoder.decode(Book.self, from: data)
+
+        XCTAssertEqual(book.coverImageURL, "https://covers.shelf.app/thumb/abc.webp")
+        XCTAssertNil(book.description)
+        XCTAssertNil(book.firstPublishedYear)
+        XCTAssertNil(book.averageRating)
+    }
+
+    func testEncodeBookRoundTrip() throws {
+        let book = MockData.makeBook()
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let data = try encoder.encode(book)
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let decoded = try decoder.decode(Book.self, from: data)
+
+        XCTAssertEqual(decoded.id, book.id)
+        XCTAssertEqual(decoded.title, book.title)
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/Models/UserTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class UserTests: XCTestCase {
+
+    func testDecodeUserFromJSON() throws {
+        let data = MockData.userJSON.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let user = try decoder.decode(User.self, from: data)
+
+        XCTAssertEqual(user.id, MockData.userID)
+        XCTAssertEqual(user.username, "testuser")
+        XCTAssertEqual(user.displayName, "Test User")
+        XCTAssertFalse(user.isPremium)
+    }
+
+    func testDecodeUserWithOptionalFields() throws {
+        let json = """
+        {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "username": "minimal",
+            "display_name": null,
+            "avatar_url": null,
+            "bio": null,
+            "favorite_books": [],
+            "is_premium": false,
+            "created_at": "2026-01-01T00:00:00Z"
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let user = try decoder.decode(User.self, from: data)
+
+        XCTAssertNil(user.displayName)
+        XCTAssertNil(user.avatarURL)
+        XCTAssertNil(user.bio)
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/Models/UserBookTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class UserBookTests: XCTestCase {
+
+    func testDecodeUserBook() throws {
+        let json = """
+        {
+            "id": "44444444-4444-4444-4444-444444444444",
+            "work_id": "33333333-3333-3333-3333-333333333333",
+            "status": "read",
+            "rating": 4.5,
+            "review_text": "Amazing book!",
+            "has_spoilers": false,
+            "started_at": null,
+            "finished_at": "2026-02-15T00:00:00Z",
+            "created_at": "2026-02-15T12:00:00Z"
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let userBook = try decoder.decode(UserBook.self, from: data)
+
+        XCTAssertEqual(userBook.status, "read")
+        XCTAssertEqual(userBook.rating, 4.5)
+        XCTAssertEqual(userBook.reviewText, "Amazing book!")
+        XCTAssertFalse(userBook.hasSpoilers)
+    }
+
+    func testHalfStarRatings() throws {
+        // Verify half-star increments decode correctly
+        let ratings: [Double] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+        for rating in ratings {
+            let json = """
+            {
+                "id": "44444444-4444-4444-4444-444444444444",
+                "work_id": "33333333-3333-3333-3333-333333333333",
+                "status": "read",
+                "rating": \(rating),
+                "review_text": null,
+                "has_spoilers": false,
+                "started_at": null,
+                "finished_at": null,
+                "created_at": "2026-01-01T00:00:00Z"
+            }
+            """
+            let data = json.data(using: .utf8)!
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            decoder.dateDecodingStrategy = .iso8601
+            let userBook = try decoder.decode(UserBook.self, from: data)
+            XCTAssertEqual(userBook.rating, rating, accuracy: 0.01)
+        }
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/Services/APIClientTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class APIClientTests: XCTestCase {
+
+    func testBaseURLConstruction() {
+        // Verify API client builds correct URLs
+        let client = APIClient.shared
+        // The base URL should end with /api/v1
+        // This tests the URL construction logic
+        XCTAssertNotNil(client)
+    }
+
+    func testAuthHeaderIncluded() async {
+        // Verify that authenticated requests include the Bearer token
+        // This requires the MockAPIClient or URLProtocol-based mocking
+        let mock = MockAPIClient()
+        mock.register(path: "/me", response: MockData.makeUser())
+
+        // After calling request, verify the auth header was set
+        // (implementation depends on how APIClient is structured)
+    }
+
+    func testPaginatedResponseDecoding() throws {
+        let json = """
+        {
+            "items": [
+                {
+                    "id": "33333333-3333-3333-3333-333333333333",
+                    "title": "Book 1",
+                    "authors": ["Author"],
+                    "description": null,
+                    "first_published_year": null,
+                    "cover_image_url": null,
+                    "average_rating": null,
+                    "ratings_count": 0,
+                    "subjects": []
+                }
+            ],
+            "next_cursor": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wMS0wMSJ9",
+            "has_more": true
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(PaginatedResponse<Book>.self, from: data)
+
+        XCTAssertEqual(response.items.count, 1)
+        XCTAssertTrue(response.hasMore)
+        XCTAssertNotNil(response.nextCursor)
+    }
+
+    func testErrorResponseDecoding() throws {
+        let json = """
+        {
+            "detail": {
+                "error": {
+                    "code": "REVIEW_FLAGGED",
+                    "message": "Your review was flagged."
+                }
+            }
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        // Verify the error structure can be parsed
+        let errorResponse = try decoder.decode(APIErrorResponse.self, from: data)
+        XCTAssertEqual(errorResponse.detail.error.code, "REVIEW_FLAGGED")
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/ViewModels/SearchViewModelTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class SearchViewModelTests: XCTestCase {
+
+    func testInitialStateIsEmpty() {
+        let vm = SearchViewModel()
+        XCTAssertEqual(vm.searchQuery, "")
+        XCTAssertTrue(vm.searchResults.isEmpty)
+        XCTAssertFalse(vm.isLoading)
+        XCTAssertNil(vm.errorMessage)
+    }
+
+    func testSearchUpdatesResults() async {
+        let vm = SearchViewModel()
+        // Inject mock service
+        let mockBooks = [MockData.makeBook()]
+        let mockResponse = MockData.makePaginatedResponse(items: mockBooks)
+
+        // The test depends on SearchViewModel accepting a dependency-injected
+        // service. If it uses BookService.shared directly, we need to use
+        // URLProtocol-based mocking or refactor for testability.
+        //
+        // Recommended: add a `bookService` parameter to SearchViewModel init
+        // with a default of BookService.shared for production use.
+
+        // vm.searchQuery = "Gatsby"
+        // await vm.search()
+        // XCTAssertEqual(vm.searchResults.count, 1)
+        // XCTAssertEqual(vm.searchResults[0].title, "The Great Gatsby")
+    }
+
+    func testEmptySearchClearsResults() async {
+        let vm = SearchViewModel()
+        vm.searchQuery = ""
+        // After clearing, results should be empty
+        XCTAssertTrue(vm.searchResults.isEmpty)
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/ViewModels/BookDetailViewModelTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class BookDetailViewModelTests: XCTestCase {
+
+    func testInitialState() {
+        let vm = BookDetailViewModel(bookID: MockData.workID)
+        XCTAssertNil(vm.book)
+        XCTAssertTrue(vm.isLoading)
+        XCTAssertNil(vm.errorMessage)
+    }
+
+    func testLoadBookSetsBookProperty() async {
+        // With dependency injection:
+        // let mockService = MockBookService()
+        // mockService.bookDetail = MockData.makeBook()
+        // let vm = BookDetailViewModel(bookID: MockData.workID, service: mockService)
+        // await vm.loadBook()
+        // XCTAssertNotNil(vm.book)
+        // XCTAssertEqual(vm.book?.title, "The Great Gatsby")
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/ViewModels/FeedViewModelTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class FeedViewModelTests: XCTestCase {
+
+    func testInitialStateIsEmpty() {
+        let vm = FeedViewModel()
+        XCTAssertTrue(vm.feedItems.isEmpty)
+        XCTAssertFalse(vm.isLoading)
+        XCTAssertFalse(vm.hasMore)
+    }
+
+    func testRefreshClearsAndReloads() async {
+        let vm = FeedViewModel()
+        // After refresh, cursor should be reset and items reloaded
+        // Requires mock FeedService injection
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/Services/OfflineStoreTests.swift
+================================================================================
+
+import XCTest
+import SwiftData
+@testable import Shelf
+
+final class OfflineStoreTests: XCTestCase {
+
+    // Use in-memory SwiftData container for tests
+    var container: ModelContainer!
+
+    override func setUp() {
+        super.setUp()
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        // container = try! ModelContainer(for: OfflineMutation.self, configurations: config)
+    }
+
+    func testQueueMutationStoresPendingAction() async throws {
+        // let store = OfflineStore(container: container)
+        // await store.queue(mutation: .logBook(workID: MockData.workID, status: "read"))
+
+        // let pending = await store.pendingMutations()
+        // XCTAssertEqual(pending.count, 1)
+    }
+
+    func testReplayMutationsCallsAPI() async throws {
+        // Queue a mutation, then replay with a mock API client
+        // Verify the API was called and mutation was removed from queue
+    }
+
+    func testDuplicateMutationsCoalesced() async throws {
+        // Queue two log_book mutations for the same work
+        // Only the latest should be replayed
+    }
+}
+
+
+================================================================================
+FILE: ios/ShelfTests/Integration/OfflineSyncIntegrationTests.swift
+================================================================================
+
+import XCTest
+@testable import Shelf
+
+final class OfflineSyncIntegrationTests: XCTestCase {
+
+    func testOfflineMutationReplayedOnReconnect() async throws {
+        // 1. Queue a "log book" mutation while offline
+        // 2. Simulate network reconnect
+        // 3. Verify SyncService replayed the mutation
+        // 4. Verify the mutation was removed from the queue
+    }
+
+    func testConflictResolutionLastWriteWins() async throws {
+        // 1. Queue a rating update offline
+        // 2. Meanwhile, simulate server having a different rating
+        // 3. On sync, verify last-write-wins behavior
+    }
+}
+
+
+================================================================================
+MAKING SERVICES TESTABLE (Prerequisite Refactoring)
+================================================================================
+
+The current architecture uses singleton .shared instances (e.g.,
+BookService.shared, APIClient.shared) which makes unit testing difficult.
+
+Recommended refactoring for testability:
+
+1. Extract protocols for each service:
+
+    protocol BookServiceProtocol {
+        func search(query: String, cursor: String?) async throws -> PaginatedResponse<Book>
+        func getDetail(id: UUID) async throws -> BookDetail
+    }
+
+    final class BookService: BookServiceProtocol { ... }
+
+2. Accept service dependencies in view model initializers:
+
+    @Observable
+    final class SearchViewModel {
+        private let bookService: BookServiceProtocol
+
+        init(bookService: BookServiceProtocol = BookService.shared) {
+            self.bookService = bookService
+        }
+    }
+
+3. In tests, inject mock implementations:
+
+    final class MockBookService: BookServiceProtocol {
+        var searchResult: PaginatedResponse<Book> = ...
+        func search(...) async throws -> PaginatedResponse<Book> {
+            return searchResult
+        }
+    }
+
+This refactoring is optional but significantly improves test coverage
+quality. Without it, tests are limited to model decoding and integration
+tests that hit real/mocked HTTP endpoints.
+
+
+================================================================================
+UI TESTS (XCUITest — Lower Priority)
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/ShelfUITests/ShelfUITests.swift  (NEW target)
+────────────────────────────────────────────────────────────────────────────────
+
+import XCTest
+
+final class ShelfUITests: XCTestCase {
+
+    let app = XCUIApplication()
+
+    override func setUp() {
+        continueAfterFailure = false
+        app.launchArguments = ["--uitesting"]  // Skip auth, use mock data
+        app.launch()
+    }
+
+    func testSearchAndViewBookDetail() {
+        // Tap search tab
+        app.tabBars.buttons["Search"].tap()
+
+        // Type in search field
+        let searchField = app.searchFields.firstMatch
+        searchField.tap()
+        searchField.typeText("Gatsby")
+
+        // Wait for results
+        let firstResult = app.cells.firstMatch
+        XCTAssertTrue(firstResult.waitForExistence(timeout: 5))
+
+        // Tap first result
+        firstResult.tap()
+
+        // Verify book detail loaded
+        XCTAssertTrue(app.staticTexts["The Great Gatsby"].exists)
+    }
+
+    func testLogBookFlow() {
+        // Navigate to a book detail
+        // Tap "Log" button
+        // Select status, add rating
+        // Submit
+        // Verify success
+    }
+
+    func testFeedLoads() {
+        app.tabBars.buttons["Feed"].tap()
+        // Verify feed items appear or empty state shows
+        let feedContent = app.scrollViews.firstMatch
+        XCTAssertTrue(feedContent.waitForExistence(timeout: 5))
+    }
+}
+
+
+================================================================================
+PRIORITY ORDER
+================================================================================
+
+| Priority | Test Area               | Files | Why                          |
+|----------|-------------------------|-------|------------------------------|
+| P0       | Model Codable tests     | 4     | Catches API contract breaks  |
+| P0       | API error handling tests | 1     | Prevents crash on bad data   |
+| P1       | Service protocol extract | 5     | Enables all further testing  |
+| P1       | ViewModel unit tests    | 5     | Core business logic          |
+| P2       | OfflineStore tests      | 1     | Data integrity               |
+| P2       | Sync integration tests  | 1     | End-to-end offline flow      |
+| P3       | UI tests               | 1     | Critical user flows          |
+
+Estimated effort: ~3 days for P0+P1, ~2 days for P2+P3.

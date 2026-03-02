@@ -1,0 +1,237 @@
+================================================================================
+21 — Push Notifications: Server-Side Sending
+Connecting the existing iOS scaffolding to actual APNs delivery
+================================================================================
+
+Context: Plan 07 (push-notifications.txt) contains the full implementation
+specification — models, services, routes, APNs client, and integration hooks.
+The iOS side (NotificationService.swift) handles permission requests, device
+token registration, and incoming notification routing.
+
+This plan covers what's specifically still MISSING to go from scaffolding to
+working push notifications end-to-end.
+
+================================================================================
+WHAT EXISTS (already built)
+================================================================================
+
+iOS side (fully scaffolded):
+  - NotificationService.swift — requests permission, captures device token
+  - NotificationsViewModel.swift — lists notifications, marks read
+  - NotificationsView.swift — UI for notification list
+  - ShelfApp.swift — UNUserNotificationCenter delegate setup
+
+Backend side (NOT yet built — plan 07 is the spec):
+  - Nothing. The models, services, routes, and APNs client from plan 07
+    have not been implemented in actual code.
+
+================================================================================
+WHAT NEEDS TO BE BUILT
+================================================================================
+
+All items below reference plan 07 for the detailed code. This is the
+implementation order and integration checklist.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 1: Database tables + migration
+────────────────────────────────────────────────────────────────────────────────
+
+Create two tables (see plan 07 for full schema):
+
+  device_tokens
+    - id, user_id, token (unique), platform, created_at, updated_at
+    - Indexes: user_id, (user_id, platform)
+
+  notifications
+    - id, recipient_user_id, type, title, body, metadata (JSONB),
+      is_read, created_at, updated_at
+    - Indexes: recipient_user_id, (recipient_user_id, is_read, created_at)
+
+Files to create:
+  backend/models/device.py         — DeviceToken model
+  backend/models/notification.py   — Notification model + NotificationType enum
+  backend/migrations/versions/xxxx_add_device_tokens_and_notifications.py
+
+Files to modify:
+  backend/models/__init__.py       — add imports
+  backend/api/model_stubs.py       — add DeviceToken + Notification stubs
+
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 2: APNs HTTP/2 client
+────────────────────────────────────────────────────────────────────────────────
+
+Create: backend/services/apns.py
+
+This is the core piece that's missing. Requires:
+  - httpx[http2] for HTTP/2 APNs requests
+  - PyJWT + cryptography for ES256 JWT generation from .p8 key
+  - JWT caching (50-minute refresh cycle)
+  - Token validation error handling (InvalidTokenError)
+  - Retry logic for 403 (JWT refresh) and 5xx (server error)
+
+Apple .p8 key file requirements:
+  - Generated in developer.apple.com → Keys → Create Key → APNs
+  - Downloaded once — store securely (Railway volume or build secret)
+  - Key ID and Team ID needed for JWT claims
+
+Environment variables needed:
+  APNS_KEY_ID       — 10-char key ID from Apple
+  APNS_TEAM_ID      — 10-char Apple Developer Team ID
+  APNS_BUNDLE_ID    — com.shelf.app
+  APNS_KEY_PATH     — absolute path to .p8 file on server
+  APNS_USE_SANDBOX  — true for dev, false for production
+
+Dependencies to add to backend/requirements.txt:
+  httpx[http2]>=0.27.0
+  PyJWT>=2.8.0
+  cryptography>=42.0.0
+
+Add config fields to backend/api/config.py Settings class:
+  apns_key_id: str = ""
+  apns_team_id: str = ""
+  apns_bundle_id: str = "com.shelf.app"
+  apns_key_path: str = ""
+  apns_use_sandbox: bool = True
+
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 3: Notification service layer
+────────────────────────────────────────────────────────────────────────────────
+
+Create: backend/services/notification_service.py
+
+Functions:
+  - register_device(db, user_id, token, platform)
+      Upsert device token. If token exists for different user, reassign.
+  - unregister_device(db, user_id, token)
+      Delete device token (logout/disable).
+  - create_notification(db, recipient_id, type, title, body, metadata)
+      Persist notification + send push to all registered devices.
+      On InvalidTokenError: remove the stale device token.
+  - send_batch_notifications(db, notifications_list)
+      Loop over create_notification for batch sends.
+  - get_notifications(db, user_id, cursor, limit)
+      Paginated notification list (cursor-keyset).
+  - mark_read(db, user_id, notification_ids)
+      Bulk mark as read (only user's own).
+  - get_unread_count(db, user_id)
+      Badge count for push payloads.
+
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 4: API routes
+────────────────────────────────────────────────────────────────────────────────
+
+Create: backend/api/routes/notifications.py
+Create: backend/api/schemas/notification.py
+
+Endpoints:
+  POST   /api/v1/me/devices               — register device token
+  DELETE /api/v1/me/devices               — unregister device token
+  GET    /api/v1/notifications            — list notifications (paginated)
+  POST   /api/v1/notifications/read       — mark notifications as read
+  GET    /api/v1/notifications/unread-count — badge count
+
+Register router in backend/api/main.py.
+
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 5: Integration hooks (trigger points)
+────────────────────────────────────────────────────────────────────────────────
+
+These are the places in existing backend code where notifications should fire:
+
+a) FOLLOW — backend/services/social_service.py → follow_user()
+   After creating the Follow record:
+     await create_notification(
+         db, target_id, "follow",
+         "New follower",
+         f"{follower.display_name or follower.username} started following you",
+         metadata={"user_id": str(follower_id), "username": follower.username}
+     )
+
+b) BOOK FINISHED — backend/services/user_book_service.py → log_book()
+   When status == "read", notify all followers:
+     - Query follower IDs from Follow table
+     - send_batch_notifications with type="book_finished"
+     - Truncate book title to 50 chars in notification body
+
+c) IMPORT COMPLETE — backend/services/import_service.py
+   After marking import job as "completed":
+     await create_notification(
+         db, user_id, "import_complete",
+         "Import complete",
+         f"Your import is done! {matched} books matched.",
+         metadata={"matched": matched, "needs_review": needs_review}
+     )
+
+d) BOOK STARTED (optional, lower priority):
+   When status == "reading", notify followers.
+   Same pattern as book finished but with type="book_started".
+
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 6: iOS device token registration
+────────────────────────────────────────────────────────────────────────────────
+
+The iOS NotificationService already captures the APNs device token. Wire it
+to the backend:
+
+FILE: ios/Shelf/Services/NotificationService.swift  (modification)
+
+After receiving the device token in didRegisterForRemoteNotificationsWithDeviceToken:
+
+    func registerToken(_ tokenData: Data) async {
+        let tokenString = tokenData.map { String(format: "%02x", $0) }.joined()
+
+        do {
+            try await APIClient.shared.request(
+                method: .post,
+                path: "/me/devices",
+                body: ["device_token": tokenString, "platform": "ios"]
+            )
+        } catch {
+            // Log error but don't block — token will be retried next launch
+            print("Failed to register device token: \(error)")
+        }
+    }
+
+On logout, call DELETE /me/devices with the stored token.
+
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 7: Tests
+────────────────────────────────────────────────────────────────────────────────
+
+Create: backend/tests/test_notifications.py
+
+Test cases (see plan 07 for full test code):
+  - Register device: success, duplicate (upsert), missing token (422)
+  - Unregister device: success
+  - List notifications: empty, with items, pagination
+  - Mark read: empty list, nonexistent IDs, valid IDs
+  - Unread count: default zero, after creating notifications
+  - Token reassignment: token moves from user A to user B
+  - Invalid token cleanup: APNs InvalidTokenError removes device
+  - Unread count updates after mark_read
+
+All tests mock the APNs send_push function to avoid real HTTP calls.
+
+
+================================================================================
+END-TO-END VERIFICATION
+================================================================================
+
+1. Start backend locally
+2. Register a device token: POST /api/v1/me/devices
+3. Have another test user follow the first user
+4. Check notifications: GET /api/v1/notifications → should show "New follower"
+5. Check unread count: GET /api/v1/notifications/unread-count → count: 1
+6. Mark read: POST /api/v1/notifications/read → count drops to 0
+7. On real device: verify iOS receives the push via APNs sandbox
+
+APNs sandbox testing:
+  - Set APNS_USE_SANDBOX=true
+  - Run on physical device (simulator doesn't receive pushes)
+  - Check Console.app for APNs delivery logs

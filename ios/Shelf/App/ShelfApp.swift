@@ -7,17 +7,23 @@ import SwiftUI
 struct ShelfApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var authService = AuthService.shared
+    @State private var deepLinkHandler = DeepLinkHandler.shared
 
     init() {
         // Initialize SDKs
         AnalyticsService.configure()
         SubscriptionService.shared.configure()
+        AdService.shared.configure()
     }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(authService)
+                .environment(deepLinkHandler)
+                .onOpenURL { url in
+                    deepLinkHandler.handle(url)
+                }
                 .task {
                     await authService.restoreSession()
 
@@ -28,6 +34,20 @@ struct ShelfApp: App {
                         ])
                         SubscriptionService.shared.configureUser(userID: user.id.uuidString)
                         await SubscriptionService.shared.checkSubscriptionStatus()
+
+                        // Sync auth token to shared storage for share extension
+                        SharedStorage.authToken = APIClient.shared.authToken
+                    }
+
+                    // Request ATT for non-premium users (AdMob personalization)
+                    if !SubscriptionService.shared.isPremium {
+                        await AdService.shared.requestTrackingAuthorization()
+                    }
+
+                    // Check for pending book from share extension
+                    if let pendingURL = SharedStorage.pendingBookURL {
+                        deepLinkHandler.handle(pendingURL)
+                        SharedStorage.clearPendingBook()
                     }
                 }
         }
@@ -68,7 +88,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     ) async {
         let userInfo = response.notification.request.content.userInfo
         _ = NotificationService.shared.handleNotification(userInfo)
-        // TODO: Navigate to destination via a shared navigation state
     }
 }
 

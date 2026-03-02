@@ -1,5 +1,29 @@
 import Foundation
 
+// MARK: - Feed Type
+
+enum FeedType: String, Codable {
+    case following
+    case popular
+    case mixed
+}
+
+// MARK: - Feed Response
+
+struct FeedResponse: Codable {
+    let feedType: FeedType
+    let items: [FeedItem]
+    let nextCursor: String?
+    let hasMore: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case items
+        case feedType = "feed_type"
+        case nextCursor = "next_cursor"
+        case hasMore = "has_more"
+    }
+}
+
 // MARK: - Activity Type
 
 enum ActivityType: String, Codable {

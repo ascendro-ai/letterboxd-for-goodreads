@@ -56,5 +56,14 @@ struct FeedItemView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityDescription)
+    }
+
+    private var accessibilityDescription: String {
+        var parts = ["\(item.user.username) \(item.activityType.displayText) \(item.book.title)"]
+        if let author = item.book.authors.first?.name { parts.append("by \(author)") }
+        if let rating = item.rating { parts.append("rated \(String(format: "%.1f", rating)) stars") }
+        return parts.joined(separator: ", ")
     }
 }

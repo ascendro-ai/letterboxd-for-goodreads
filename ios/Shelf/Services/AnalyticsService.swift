@@ -8,9 +8,8 @@ import Sentry
 import PostHog
 
 enum AnalyticsService {
-    // TODO: Set DSNs before release
     static let sentryDSN = ""
-    static let postHogAPIKey = ""
+    static let postHogAPIKey = "phc_rqDz1mNacuqnbKD0AJOic8cMglK2dzUrcI6S7ectCZV"
     static let postHogHost = "https://us.i.posthog.com"
 
     // MARK: - Initialization
@@ -116,6 +115,10 @@ enum AnalyticsEvent: String {
     case paywallViewed = "paywall_viewed"
     case subscriptionStarted = "subscription_started"
     case subscriptionRestored = "subscription_restored"
+
+    // Ads
+    case adImpression = "ad_impression"
+    case adClick = "ad_click"
 
     // Engagement
     case affiliateLinkTapped = "affiliate_link_tapped"

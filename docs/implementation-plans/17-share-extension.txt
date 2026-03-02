@@ -1,0 +1,863 @@
+================================================================================
+17 — iOS Share Extension
+Receive book links from Safari, Instagram, etc. and open them in Shelf
+================================================================================
+
+Users share a URL from Safari (Amazon, Bookshop.org, Open Library, Goodreads)
+to the Shelf share extension. The extension extracts a book identifier (ISBN,
+ASIN, work ID), stores it in shared App Group storage, and opens the main app
+via a custom URL scheme. The main app resolves the identifier to a book and
+navigates to BookDetailView.
+
+================================================================================
+XCODE PROJECT CONFIGURATION
+================================================================================
+
+1. In Xcode: File -> New -> Target -> Share Extension
+   - Product name: ShelfShare
+   - Team: (your team)
+   - Bundle identifier: com.shelf.app.share
+   - Embed in Application: Shelf
+
+2. Add App Group capability to BOTH targets:
+   Main app target (Shelf):
+     Signing & Capabilities -> + Capability -> App Groups
+     Add: group.com.shelf.app
+
+   Extension target (ShelfShare):
+     Signing & Capabilities -> + Capability -> App Groups
+     Add: group.com.shelf.app
+
+3. Add URL Scheme to main app target:
+   Info -> URL Types -> +
+     Identifier: com.shelf.app
+     URL Schemes: shelf
+     Role: Viewer
+
+4. Delete the default ShareViewController.swift and MainInterface.storyboard
+   that Xcode generates. Replace with the files below.
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/ShelfShare/BookIdentifier.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+enum BookIdentifier: Codable, Equatable {
+    case isbn(String)
+    case amazonASIN(String)
+    case openLibraryWork(String)
+    case goodreadsID(String)
+    case rawURL(URL)
+
+    // MARK: - URL Parsing
+
+    static func extract(from url: URL) -> BookIdentifier? {
+        let host = url.host?.lowercased() ?? ""
+        let path = url.path
+
+        // Amazon: /dp/ASIN or /gp/product/ASIN
+        if host.contains("amazon") {
+            if let asin = extractAmazonASIN(from: path) {
+                return .amazonASIN(asin)
+            }
+        }
+
+        // Bookshop.org: /p/books/TITLE/ISBN13
+        if host.contains("bookshop.org") {
+            if let isbn = extractBookshopISBN(from: path) {
+                return .isbn(isbn)
+            }
+        }
+
+        // Open Library: /works/OL12345W
+        if host.contains("openlibrary.org") {
+            if let workID = extractOpenLibraryWorkID(from: path) {
+                return .openLibraryWork(workID)
+            }
+        }
+
+        // Goodreads: /book/show/12345 or /book/show/12345-title-slug
+        if host.contains("goodreads.com") {
+            if let bookID = extractGoodreadsID(from: path) {
+                return .goodreadsID(bookID)
+            }
+        }
+
+        // Fallback: try to find an ISBN-13 or ISBN-10 anywhere in the URL string
+        let urlString = url.absoluteString
+        if let isbn = extractISBNFromString(urlString) {
+            return .isbn(isbn)
+        }
+
+        // Last resort: pass the raw URL for backend resolution
+        return .rawURL(url)
+    }
+
+    // MARK: - Amazon ASIN Extraction
+
+    private static func extractAmazonASIN(from path: String) -> String? {
+        let segments = path.split(separator: "/").map(String.init)
+
+        // /dp/ASIN pattern
+        if let dpIndex = segments.firstIndex(of: "dp"), dpIndex + 1 < segments.count {
+            let candidate = segments[dpIndex + 1]
+            if isValidASIN(candidate) {
+                return candidate
+            }
+        }
+
+        // /gp/product/ASIN pattern
+        if let gpIndex = segments.firstIndex(of: "gp"),
+           gpIndex + 1 < segments.count,
+           segments[gpIndex + 1] == "product",
+           gpIndex + 2 < segments.count {
+            let candidate = segments[gpIndex + 2]
+            if isValidASIN(candidate) {
+                return candidate
+            }
+        }
+
+        return nil
+    }
+
+    private static func isValidASIN(_ candidate: String) -> Bool {
+        // ASIN is 10 characters, alphanumeric
+        let pattern = /^[A-Z0-9]{10}$/
+        return candidate.uppercased().contains(pattern)
+    }
+
+    // MARK: - Bookshop.org ISBN Extraction
+
+    private static func extractBookshopISBN(from path: String) -> String? {
+        let segments = path.split(separator: "/").map(String.init)
+        // The ISBN-13 is typically the last path component
+        for segment in segments.reversed() {
+            let cleaned = segment.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+            if cleaned.count == 13 && cleaned.hasPrefix("978") {
+                return cleaned
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Open Library Work ID Extraction
+
+    private static func extractOpenLibraryWorkID(from path: String) -> String? {
+        // /works/OL12345W or /works/OL12345W/title-slug
+        let pattern = /\/works\/(OL\d+W)/
+        if let match = path.firstMatch(of: pattern) {
+            return String(match.1)
+        }
+        return nil
+    }
+
+    // MARK: - Goodreads Book ID Extraction
+
+    private static func extractGoodreadsID(from path: String) -> String? {
+        // /book/show/12345 or /book/show/12345-title-slug or /book/show/12345.TitleSlug
+        let pattern = /\/book\/show\/(\d+)/
+        if let match = path.firstMatch(of: pattern) {
+            return String(match.1)
+        }
+        return nil
+    }
+
+    // MARK: - Generic ISBN Extraction
+
+    private static func extractISBNFromString(_ string: String) -> String? {
+        // ISBN-13
+        let isbn13Pattern = /(?:97[89])\d{10}/
+        if let match = string.firstMatch(of: isbn13Pattern) {
+            return String(match.0)
+        }
+        // ISBN-10 (10 digits or 9 digits + X)
+        let isbn10Pattern = /\d{9}[\dXx]/
+        if let match = string.firstMatch(of: isbn10Pattern) {
+            return String(match.0)
+        }
+        return nil
+    }
+
+    // MARK: - URL Scheme Encoding
+
+    var urlSchemeParameter: String {
+        switch self {
+        case .isbn(let value):
+            return "isbn=\(value)"
+        case .amazonASIN(let value):
+            return "asin=\(value)"
+        case .openLibraryWork(let value):
+            return "ol_work=\(value)"
+        case .goodreadsID(let value):
+            return "goodreads_id=\(value)"
+        case .rawURL(let url):
+            return "url=\(url.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
+        }
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/ShelfShare/SharedStorage.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+struct SharedStorage {
+    static let suiteName = "group.com.shelf.app"
+    private static let pendingBookKey = "pendingSharedBook"
+
+    static var sharedDefaults: UserDefaults {
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            fatalError("App Group '\(suiteName)' is not configured. Add App Group capability to both targets.")
+        }
+        return defaults
+    }
+
+    static func savePendingBook(_ identifier: BookIdentifier) {
+        let encoder = JSONEncoder()
+        if let data = try? encoder.encode(identifier) {
+            sharedDefaults.set(data, forKey: pendingBookKey)
+            sharedDefaults.synchronize()
+        }
+    }
+
+    static func getPendingBook() -> BookIdentifier? {
+        guard let data = sharedDefaults.data(forKey: pendingBookKey) else { return nil }
+        let decoder = JSONDecoder()
+        return try? decoder.decode(BookIdentifier.self, from: data)
+    }
+
+    static func clearPendingBook() {
+        sharedDefaults.removeObject(forKey: pendingBookKey)
+        sharedDefaults.synchronize()
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/ShelfShare/ShareViewController.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import UIKit
+import UniformTypeIdentifiers
+
+final class ShareViewController: UIViewController {
+
+    private let confirmationLabel: UILabel = {
+        let label = UILabel()
+        label.text = "Opening in Shelf..."
+        label.font = .preferredFont(forTextStyle: .headline)
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+
+    private let bookIconView: UIImageView = {
+        let config = UIImage.SymbolConfiguration(pointSize: 48, weight: .medium)
+        let image = UIImage(systemName: "books.vertical.fill", withConfiguration: config)
+        let imageView = UIImageView(image: image)
+        imageView.tintColor = .systemBlue
+        imageView.contentMode = .scaleAspectFit
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        return imageView
+    }()
+
+    private let activityIndicator: UIActivityIndicatorView = {
+        let indicator = UIActivityIndicatorView(style: .medium)
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.hidesWhenStopped = true
+        return indicator
+    }()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        view.backgroundColor = .systemBackground
+        setupUI()
+        extractSharedContent()
+    }
+
+    private func setupUI() {
+        let stack = UIStackView(arrangedSubviews: [bookIconView, confirmationLabel, activityIndicator])
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        view.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            bookIconView.widthAnchor.constraint(equalToConstant: 64),
+            bookIconView.heightAnchor.constraint(equalToConstant: 64),
+        ])
+
+        activityIndicator.startAnimating()
+    }
+
+    private func extractSharedContent() {
+        guard let extensionItems = extensionContext?.inputItems as? [NSExtensionItem] else {
+            completeWithError("No content to share.")
+            return
+        }
+
+        for item in extensionItems {
+            guard let attachments = item.attachments else { continue }
+
+            for provider in attachments {
+                // Try URL first
+                if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                    provider.loadItem(forTypeIdentifier: UTType.url.identifier) { [weak self] item, error in
+                        DispatchQueue.main.async {
+                            if let url = item as? URL {
+                                self?.handleURL(url)
+                            } else if let error {
+                                self?.completeWithError("Could not read URL: \(error.localizedDescription)")
+                            } else {
+                                self?.completeWithError("Unsupported content type.")
+                            }
+                        }
+                    }
+                    return
+                }
+
+                // Try plain text (might contain a URL)
+                if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
+                    provider.loadItem(forTypeIdentifier: UTType.plainText.identifier) { [weak self] item, error in
+                        DispatchQueue.main.async {
+                            if let text = item as? String, let url = URL(string: text), url.scheme != nil {
+                                self?.handleURL(url)
+                            } else {
+                                self?.completeWithError("No book link found in shared content.")
+                            }
+                        }
+                    }
+                    return
+                }
+            }
+        }
+
+        completeWithError("No supported content found.")
+    }
+
+    private func handleURL(_ url: URL) {
+        guard let identifier = BookIdentifier.extract(from: url) else {
+            completeWithError("Could not identify a book from this link.")
+            return
+        }
+
+        activityIndicator.stopAnimating()
+
+        // Store in shared storage as backup
+        SharedStorage.savePendingBook(identifier)
+
+        // Open main app via URL scheme
+        let shelfURL = URL(string: "shelf://shared-book?\(identifier.urlSchemeParameter)")!
+        openMainApp(url: shelfURL)
+    }
+
+    private func openMainApp(url: URL) {
+        // Use responder chain to open URL from extension
+        var responder: UIResponder? = self
+        while let nextResponder = responder?.next {
+            if let application = nextResponder as? UIApplication {
+                application.open(url, options: [:]) { [weak self] success in
+                    if success {
+                        self?.extensionContext?.completeRequest(returningItems: nil)
+                    } else {
+                        // Fallback: the book identifier is saved in SharedStorage
+                        // The main app will pick it up on next launch
+                        self?.confirmationLabel.text = "Saved! Open Shelf to view."
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            self?.extensionContext?.completeRequest(returningItems: nil)
+                        }
+                    }
+                }
+                return
+            }
+            responder = nextResponder
+        }
+
+        // If responder chain fails, still complete gracefully
+        confirmationLabel.text = "Saved! Open Shelf to view."
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.extensionContext?.completeRequest(returningItems: nil)
+        }
+    }
+
+    private func completeWithError(_ message: String) {
+        activityIndicator.stopAnimating()
+        confirmationLabel.text = message
+        confirmationLabel.textColor = .secondaryLabel
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            let error = NSError(domain: "com.shelf.app.share", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: message,
+            ])
+            self?.extensionContext?.cancelRequest(withError: error)
+        }
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/ShelfShare/Info.plist
+────────────────────────────────────────────────────────────────────────────────
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.share-services</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
+        <key>NSExtensionActivationRule</key>
+        <dict>
+            <key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
+            <integer>1</integer>
+            <key>NSExtensionActivationSupportsText</key>
+            <true/>
+        </dict>
+    </dict>
+</dict>
+</plist>
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/DeepLinkHandler.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+import SwiftUI
+
+@Observable
+final class DeepLinkHandler {
+    static let shared = DeepLinkHandler()
+
+    private(set) var pendingBookNavigation: UUID?
+    private(set) var isResolvingBook = false
+    private(set) var resolutionError: String?
+
+    private let bookService = BookService.shared
+    private let api = APIClient.shared
+
+    private init() {}
+
+    // MARK: - Handle Incoming URL
+
+    @MainActor
+    func handleURL(_ url: URL) async {
+        guard url.scheme == "shelf" else { return }
+
+        switch url.host {
+        case "shared-book":
+            await handleSharedBook(url: url)
+        default:
+            break
+        }
+    }
+
+    // MARK: - Shared Book Handling
+
+    @MainActor
+    private func handleSharedBook(url: URL) async {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let queryItems = components.queryItems ?? []
+
+        isResolvingBook = true
+        resolutionError = nil
+
+        defer {
+            isResolvingBook = false
+            SharedStorage.clearPendingBook()
+        }
+
+        // Extract identifier from query parameters
+        if let isbn = queryItems.first(where: { $0.name == "isbn" })?.value {
+            await resolveByISBN(isbn)
+        } else if let asin = queryItems.first(where: { $0.name == "asin" })?.value {
+            // ASINs that start with 0 are ISBN-10s
+            if asin.hasPrefix("0") {
+                await resolveByISBN(asin)
+            } else {
+                // For non-ISBN ASINs, try searching by ASIN as a query
+                await resolveBySearch(query: asin)
+            }
+        } else if let olWork = queryItems.first(where: { $0.name == "ol_work" })?.value {
+            await resolveByOpenLibraryWork(olWork)
+        } else if let goodreadsID = queryItems.first(where: { $0.name == "goodreads_id" })?.value {
+            await resolveBySearch(query: "goodreads:\(goodreadsID)")
+        } else if let rawURL = queryItems.first(where: { $0.name == "url" })?.value {
+            // Last resort: send URL to backend for resolution
+            await resolveByExternalURL(rawURL)
+        } else {
+            resolutionError = "Could not identify book from shared link."
+        }
+    }
+
+    @MainActor
+    private func resolveByISBN(_ isbn: String) async {
+        do {
+            let book: Book = try await api.request(.get, path: "/books/isbn/\(isbn)")
+            pendingBookNavigation = book.id
+        } catch {
+            resolutionError = "Could not find a book with ISBN \(isbn)."
+        }
+    }
+
+    @MainActor
+    private func resolveByOpenLibraryWork(_ workID: String) async {
+        do {
+            let results: PaginatedResponse<Book> = try await api.request(
+                .get,
+                path: "/search",
+                queryItems: [
+                    URLQueryItem(name: "q", value: workID),
+                    URLQueryItem(name: "limit", value: "1"),
+                ]
+            )
+            if let first = results.items.first {
+                pendingBookNavigation = first.id
+            } else {
+                resolutionError = "Could not find this book in our catalog."
+            }
+        } catch {
+            resolutionError = "Something went wrong looking up this book."
+        }
+    }
+
+    @MainActor
+    private func resolveBySearch(query: String) async {
+        do {
+            let results: PaginatedResponse<Book> = try await api.request(
+                .get,
+                path: "/search",
+                queryItems: [
+                    URLQueryItem(name: "q", value: query),
+                    URLQueryItem(name: "limit", value: "1"),
+                ]
+            )
+            if let first = results.items.first {
+                pendingBookNavigation = first.id
+            } else {
+                resolutionError = "Could not find this book in our catalog."
+            }
+        } catch {
+            resolutionError = "Something went wrong looking up this book."
+        }
+    }
+
+    @MainActor
+    private func resolveByExternalURL(_ urlString: String) async {
+        // Try to extract an ISBN from the URL string
+        if let isbn = extractISBNFromString(urlString) {
+            await resolveByISBN(isbn)
+            return
+        }
+        resolutionError = "Could not identify a book from this link."
+    }
+
+    private func extractISBNFromString(_ string: String) -> String? {
+        let isbn13Pattern = /(?:97[89])\d{10}/
+        if let match = string.firstMatch(of: isbn13Pattern) {
+            return String(match.0)
+        }
+        let isbn10Pattern = /\d{9}[\dXx]/
+        if let match = string.firstMatch(of: isbn10Pattern) {
+            return String(match.0)
+        }
+        return nil
+    }
+
+    // MARK: - Check for Pending Book from App Group Storage
+
+    @MainActor
+    func checkPendingBookFromStorage() async {
+        guard let identifier = SharedStorage.getPendingBook() else { return }
+        SharedStorage.clearPendingBook()
+
+        isResolvingBook = true
+        resolutionError = nil
+        defer { isResolvingBook = false }
+
+        switch identifier {
+        case .isbn(let isbn):
+            await resolveByISBN(isbn)
+        case .amazonASIN(let asin):
+            if asin.hasPrefix("0") {
+                await resolveByISBN(asin)
+            } else {
+                await resolveBySearch(query: asin)
+            }
+        case .openLibraryWork(let workID):
+            await resolveByOpenLibraryWork(workID)
+        case .goodreadsID(let id):
+            await resolveBySearch(query: "goodreads:\(id)")
+        case .rawURL(let url):
+            await resolveByExternalURL(url.absoluteString)
+        }
+    }
+
+    // MARK: - Clear Navigation State
+
+    func clearPendingNavigation() {
+        pendingBookNavigation = nil
+        resolutionError = nil
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/App/ShelfApp.swift  (full replacement)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+
+@main
+struct ShelfApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @State private var authService = AuthService.shared
+    @State private var deepLinkHandler = DeepLinkHandler.shared
+
+    init() {
+        // Initialize SDKs
+        AnalyticsService.configure()
+        SubscriptionService.shared.configure()
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(authService)
+                .environment(deepLinkHandler)
+                .onOpenURL { url in
+                    Task {
+                        await deepLinkHandler.handleURL(url)
+                    }
+                }
+                .task {
+                    await authService.restoreSession()
+
+                    // Post-auth setup
+                    if let user = authService.currentUser {
+                        AnalyticsService.identifyUser(id: user.id.uuidString, properties: [
+                            "username": user.username
+                        ])
+                        SubscriptionService.shared.configureUser(userID: user.id.uuidString)
+                        await SubscriptionService.shared.checkSubscriptionStatus()
+                    }
+
+                    // Check for pending book from share extension
+                    await deepLinkHandler.checkPendingBookFromStorage()
+                }
+        }
+    }
+}
+
+// MARK: - App Delegate for Push Notifications
+
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        NotificationService.shared.handleDeviceToken(deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationService.shared.handleRegistrationError(error)
+    }
+
+    // Handle notification tap when app is in foreground
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .badge, .sound]
+    }
+
+    // Handle notification tap when app is in background
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let userInfo = response.notification.request.content.userInfo
+        _ = NotificationService.shared.handleNotification(userInfo)
+    }
+}
+
+// MARK: - Root View with Onboarding
+
+struct RootView: View {
+    @Environment(AuthService.self) private var auth
+    @Environment(DeepLinkHandler.self) private var deepLinkHandler
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+
+    var body: some View {
+        ZStack {
+            switch auth.state {
+            case .unknown:
+                LaunchScreen()
+            case .signedOut:
+                AuthView()
+            case .signedIn:
+                if hasCompletedOnboarding {
+                    ContentView()
+                } else {
+                    OnboardingView {
+                        hasCompletedOnboarding = true
+                    }
+                    .environment(auth)
+                }
+            }
+
+            // Deep link resolution overlay
+            if deepLinkHandler.isResolvingBook {
+                ZStack {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .tint(.white)
+                            .scaleEffect(1.2)
+                        Text("Finding book...")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                    }
+                    .padding(32)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { deepLinkHandler.pendingBookNavigation != nil },
+            set: { if !$0 { deepLinkHandler.clearPendingNavigation() } }
+        )) {
+            if let bookID = deepLinkHandler.pendingBookNavigation {
+                NavigationStack {
+                    BookDetailView(bookID: bookID)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Done") {
+                                    deepLinkHandler.clearPendingNavigation()
+                                }
+                            }
+                        }
+                }
+            }
+        }
+        .alert("Book Not Found", isPresented: Binding(
+            get: { deepLinkHandler.resolutionError != nil },
+            set: { if !$0 { deepLinkHandler.clearPendingNavigation() } }
+        )) {
+            Button("OK") {
+                deepLinkHandler.clearPendingNavigation()
+            }
+        } message: {
+            if let error = deepLinkHandler.resolutionError {
+                Text(error)
+            }
+        }
+    }
+}
+
+struct LaunchScreen: View {
+    var body: some View {
+        ZStack {
+            Color(.systemBackground)
+                .ignoresSafeArea()
+            VStack(spacing: 12) {
+                Image(systemName: "books.vertical.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(Color.accentColor)
+                Text("Shelf")
+                    .font(.title.bold())
+            }
+        }
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/App/ContentView.swift  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+The ContentView does not need modifications for the share extension. The
+DeepLinkHandler is injected via environment at the ShelfApp level, and the
+sheet/alert presentation happens in RootView. BookDetailView is presented
+modally when a shared book is resolved.
+
+No changes required.
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/ShelfShare/ShelfShare.entitlements
+────────────────────────────────────────────────────────────────────────────────
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.shelf.app</string>
+    </array>
+</dict>
+</plist>
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Shelf.entitlements  (add if not present, or add key)
+────────────────────────────────────────────────────────────────────────────────
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.shelf.app</string>
+    </array>
+</dict>
+</plist>
+
+
+────────────────────────────────────────────────────────────────────────────────
+TESTING NOTES
+────────────────────────────────────────────────────────────────────────────────
+
+1. Unit test BookIdentifier.extract(from:) with these URLs:
+   - "https://www.amazon.com/dp/0143127748" -> .amazonASIN("0143127748")
+   - "https://www.amazon.com/gp/product/0143127748/ref=..." -> .amazonASIN("0143127748")
+   - "https://bookshop.org/p/books/1984-george-orwell/9780451524935" -> .isbn("9780451524935")
+   - "https://openlibrary.org/works/OL1168007W/1984" -> .openLibraryWork("OL1168007W")
+   - "https://www.goodreads.com/book/show/40961427-1984" -> .goodreadsID("40961427")
+   - "https://www.goodreads.com/book/show/40961427" -> .goodreadsID("40961427")
+   - "https://random-site.com/9780451524935" -> .isbn("9780451524935")
+   - "https://random-site.com/some-page" -> .rawURL(...)
+
+2. Manual testing flow:
+   a. Open Safari, navigate to an Amazon book page
+   b. Tap Share -> select Shelf extension
+   c. Extension shows "Opening in Shelf..."
+   d. Shelf app opens and presents BookDetailView in a modal sheet
+   e. If book not found, alert appears with error message
+
+3. Test edge cases:
+   - Share extension when main app is not installed (graceful fallback)
+   - Share extension when user is not authenticated (book saved, shown after login)
+   - Malformed URLs (error message shown, extension closes)
+   - Multiple rapid shares (only latest is processed)

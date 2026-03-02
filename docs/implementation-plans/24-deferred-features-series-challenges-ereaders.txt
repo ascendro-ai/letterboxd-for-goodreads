@@ -1,0 +1,680 @@
+================================================================================
+24 — Deferred Features: Series, Reading Challenges & E-Reader Integrations
+Post-launch features intentionally deferred from v1
+================================================================================
+
+These features were scoped out of the initial release. This plan provides
+complete implementation specs so they can be picked up individually.
+
+================================================================================
+FEATURE A: BOOK SERIES
+================================================================================
+
+Track multi-book series (e.g., Harry Potter, Lord of the Rings) with ordering,
+progress tracking, and series-level pages.
+
+────────────────────────────────────────────────────────────────────────────────
+DATABASE TABLES
+────────────────────────────────────────────────────────────────────────────────
+
+series
+  - id (UUID, PK)
+  - name (String(300), required)
+  - description (Text, nullable)
+  - total_books (int, nullable — null if series is ongoing)
+  - is_complete (bool, default false)
+  - cover_image_url (String, nullable)
+  - open_library_series_id (String, unique, nullable)
+  - created_at, updated_at
+
+series_works
+  - id (UUID, PK)
+  - series_id (FK → series)
+  - work_id (FK → works)
+  - position (Numeric(5,1)) — supports "Book 3.5" (novellas between main entries)
+  - is_main_entry (bool, default true) — false for side stories, novellas
+  - created_at
+  - UNIQUE constraint: (series_id, work_id)
+  - INDEX: (series_id, position)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/series.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import Boolean, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+class Series(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "series"
+
+    name: Mapped[str] = mapped_column(String(300), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    total_books: Mapped[int | None] = mapped_column(nullable=True)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    cover_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    open_library_series_id: Mapped[str | None] = mapped_column(
+        String(50), unique=True, nullable=True
+    )
+
+    works: Mapped[list["SeriesWork"]] = relationship(
+        back_populates="series", order_by="SeriesWork.position"
+    )
+
+
+class SeriesWork(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "series_works"
+
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("series.id", ondelete="CASCADE"), nullable=False
+    )
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[float] = mapped_column(Numeric(5, 1), nullable=False)
+    is_main_entry: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    series: Mapped["Series"] = relationship(back_populates="works")
+    work: Mapped["Work"] = relationship(lazy="selectin")
+
+    __table_args__ = (
+        UniqueConstraint("series_id", "work_id", name="uq_series_work"),
+        Index("ix_series_works_series_position", "series_id", "position"),
+    )
+
+
+────────────────────────────────────────────────────────────────────────────────
+API ENDPOINTS
+────────────────────────────────────────────────────────────────────────────────
+
+GET  /api/v1/series/{id}              — Series detail + ordered works list
+GET  /api/v1/series/{id}/progress     — User's reading progress across series
+GET  /api/v1/books/{work_id}/series   — Which series a book belongs to
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/schemas/series.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from uuid import UUID
+from pydantic import BaseModel
+
+
+class SeriesWorkItem(BaseModel):
+    position: float
+    is_main_entry: bool
+    work_id: UUID
+    title: str
+    authors: list[str]
+    cover_image_url: str | None
+    user_status: str | None = None  # "read", "reading", etc. if user has logged it
+
+    model_config = {"from_attributes": True}
+
+
+class SeriesResponse(BaseModel):
+    id: UUID
+    name: str
+    description: str | None
+    total_books: int | None
+    is_complete: bool
+    cover_image_url: str | None
+    works: list[SeriesWorkItem]
+
+    model_config = {"from_attributes": True}
+
+
+class SeriesProgressResponse(BaseModel):
+    series_id: UUID
+    series_name: str
+    total_main_entries: int
+    read_count: int
+    reading_count: int
+    progress_percent: float  # read / total_main_entries * 100
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/series_service.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from backend.api.model_stubs import Series, SeriesWork, UserBook, Work
+
+
+async def get_series(db: AsyncSession, series_id: UUID, user_id: UUID | None = None):
+    """Get series detail with works in order, optionally with user progress."""
+    result = await db.execute(
+        select(Series)
+        .options(selectinload(Series.works).selectinload(SeriesWork.work))
+        .where(Series.id == series_id)
+    )
+    series = result.scalar_one_or_none()
+    if not series:
+        raise ...  # 404
+
+    # If user_id provided, fetch their status for each work
+    user_statuses = {}
+    if user_id:
+        work_ids = [sw.work_id for sw in series.works]
+        ub_result = await db.execute(
+            select(UserBook.work_id, UserBook.status)
+            .where(UserBook.user_id == user_id, UserBook.work_id.in_(work_ids))
+        )
+        user_statuses = dict(ub_result.all())
+
+    return series, user_statuses
+
+
+async def get_series_progress(db: AsyncSession, series_id: UUID, user_id: UUID):
+    """Calculate user's reading progress through a series."""
+    # Count main entries
+    total_result = await db.execute(
+        select(func.count())
+        .select_from(SeriesWork)
+        .where(SeriesWork.series_id == series_id, SeriesWork.is_main_entry == True)
+    )
+    total_main = total_result.scalar_one()
+
+    # Count user's "read" + "reading" for main entries
+    read_result = await db.execute(
+        select(func.count())
+        .select_from(UserBook)
+        .join(SeriesWork, SeriesWork.work_id == UserBook.work_id)
+        .where(
+            SeriesWork.series_id == series_id,
+            SeriesWork.is_main_entry == True,
+            UserBook.user_id == user_id,
+            UserBook.status == "read",
+        )
+    )
+    read_count = read_result.scalar_one()
+
+    reading_result = await db.execute(
+        select(func.count())
+        .select_from(UserBook)
+        .join(SeriesWork, SeriesWork.work_id == UserBook.work_id)
+        .where(
+            SeriesWork.series_id == series_id,
+            SeriesWork.is_main_entry == True,
+            UserBook.user_id == user_id,
+            UserBook.status == "reading",
+        )
+    )
+    reading_count = reading_result.scalar_one()
+
+    progress = (read_count / total_main * 100) if total_main > 0 else 0
+
+    return {
+        "total_main_entries": total_main,
+        "read_count": read_count,
+        "reading_count": reading_count,
+        "progress_percent": round(progress, 1),
+    }
+
+
+────────────────────────────────────────────────────────────────────────────────
+PIPELINE: Series Import from Open Library
+────────────────────────────────────────────────────────────────────────────────
+
+Open Library has series data in work records under `series` field.
+Add to pipeline/import_ol/parse_works.py:
+
+    # During work parsing, extract series info:
+    # work_data.get("series", []) → list of {"name": "Harry Potter", "position": "1"}
+    # Collect unique series names, create Series records, then SeriesWork junctions.
+
+This is a pipeline extension — run after bulk_import finishes.
+
+
+────────────────────────────────────────────────────────────────────────────────
+iOS: Series UI
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: ios/Shelf/Views/BookDetail/SeriesBadge.swift
+
+    // Small badge on BookDetailView showing "Harry Potter #3"
+    // Taps through to SeriesDetailView
+
+FILE: ios/Shelf/Views/Series/SeriesDetailView.swift
+
+    // List of books in order with position numbers
+    // Progress bar at top (X of Y read)
+    // Each book shows status icon (checkmark for read, book for reading, etc.)
+    // "Start Next" button highlights the next unread book
+
+
+================================================================================
+FEATURE B: READING CHALLENGES
+================================================================================
+
+Annual reading goals with progress tracking, social sharing, and badges.
+
+────────────────────────────────────────────────────────────────────────────────
+DATABASE TABLES
+────────────────────────────────────────────────────────────────────────────────
+
+reading_challenges
+  - id (UUID, PK)
+  - user_id (FK → users)
+  - year (int, e.g., 2026)
+  - goal_count (int, number of books to read)
+  - current_count (int, auto-computed, default 0)
+  - is_complete (bool, default false)
+  - completed_at (timestamp, nullable)
+  - created_at, updated_at
+  - UNIQUE constraint: (user_id, year) — one challenge per year per user
+
+challenge_books
+  - id (UUID, PK)
+  - challenge_id (FK → reading_challenges)
+  - user_book_id (FK → user_books)
+  - added_at (timestamp)
+  - UNIQUE constraint: (challenge_id, user_book_id)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/challenge.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, ForeignKey, Integer, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+class ReadingChallenge(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "reading_challenges"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    goal_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    current_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "year", name="uq_challenge_user_year"),
+    )
+
+
+class ChallengeBook(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "challenge_books"
+
+    challenge_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reading_challenges.id", ondelete="CASCADE"), nullable=False
+    )
+    user_book_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("user_books.id", ondelete="CASCADE"), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("challenge_id", "user_book_id", name="uq_challenge_book"),
+    )
+
+
+────────────────────────────────────────────────────────────────────────────────
+API ENDPOINTS
+────────────────────────────────────────────────────────────────────────────────
+
+POST   /api/v1/me/challenges           — Set reading goal for a year
+GET    /api/v1/me/challenges            — List my challenges (all years)
+GET    /api/v1/me/challenges/{year}     — Get challenge for specific year + books
+PATCH  /api/v1/me/challenges/{year}     — Update goal count
+GET    /api/v1/users/{id}/challenges/{year} — View another user's challenge
+
+────────────────────────────────────────────────────────────────────────────────
+BUSINESS RULES
+────────────────────────────────────────────────────────────────────────────────
+
+- One challenge per user per year.
+- When a user marks a book as "read" with finished_at in the challenge year,
+  auto-add to the challenge and increment current_count.
+- When current_count >= goal_count, set is_complete=true and completed_at.
+- Users can update their goal mid-year (increase or decrease).
+- Challenge progress is visible on profiles.
+- Books count toward the year they were finished in, not the year they were
+  started.
+
+────────────────────────────────────────────────────────────────────────────────
+INTEGRATION: Auto-add books to challenges
+────────────────────────────────────────────────────────────────────────────────
+
+Modify backend/services/user_book_service.py → log_book() and update_book():
+
+    # After setting status="read" with a finished_at date:
+    if status == "read" and finished_at:
+        challenge_year = finished_at.year
+        challenge = await db.execute(
+            select(ReadingChallenge).where(
+                ReadingChallenge.user_id == user_id,
+                ReadingChallenge.year == challenge_year,
+            )
+        )
+        active_challenge = challenge.scalar_one_or_none()
+
+        if active_challenge:
+            # Add to challenge if not already there
+            existing = await db.execute(
+                select(ChallengeBook).where(
+                    ChallengeBook.challenge_id == active_challenge.id,
+                    ChallengeBook.user_book_id == user_book.id,
+                )
+            )
+            if existing.scalar_one_or_none() is None:
+                db.add(ChallengeBook(
+                    challenge_id=active_challenge.id,
+                    user_book_id=user_book.id,
+                ))
+                active_challenge.current_count += 1
+                if active_challenge.current_count >= active_challenge.goal_count:
+                    active_challenge.is_complete = True
+                    active_challenge.completed_at = datetime.utcnow()
+                await db.flush()
+
+────────────────────────────────────────────────────────────────────────────────
+iOS: Challenge UI
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: ios/Shelf/Views/Profile/ReadingChallengeView.swift
+
+    // Circular progress ring showing X/Y books
+    // List of books read this year
+    // "Set Goal" sheet for creating/updating challenge
+    // Confetti animation when challenge completed
+
+FILE: ios/Shelf/Views/Profile/SetGoalSheet.swift
+
+    // Stepper or slider for goal count (1-500)
+    // Current year pre-selected
+    // Shows "You've already read X books this year" context
+
+Widget extension (future):
+    // iOS widget showing challenge progress ring
+    // Small widget: ring + "12/52"
+    // Medium widget: ring + recent books
+
+
+================================================================================
+FEATURE C: E-READER INTEGRATIONS
+================================================================================
+
+Sync reading progress from Kindle, Apple Books, and Kobo.
+
+────────────────────────────────────────────────────────────────────────────────
+OVERVIEW
+────────────────────────────────────────────────────────────────────────────────
+
+E-reader integration is the hardest feature here because major platforms
+(Kindle, Apple Books) have no public sync APIs. Realistic approaches:
+
+| Platform    | Approach                        | Feasibility |
+|-------------|----------------------------------|-------------|
+| Kindle      | Scrape kindle.amazon.com clippings | Medium — fragile, TOS gray area |
+| Kindle      | Parse "My Clippings.txt" file upload | High — user exports manually |
+| Apple Books | No API. Parse iCloud data (private) | Low — Apple doesn't expose this |
+| Apple Books | Shortcuts integration (user-triggered) | Medium — requires user setup |
+| Kobo        | Kobo API (limited partner access) | Low — invitation-only API |
+| Kobo        | Parse Kobo SQLite DB export | Medium — user exports manually |
+
+Recommended v1 approach: **File upload import** (manual export from device).
+
+────────────────────────────────────────────────────────────────────────────────
+A. Kindle Clippings Import
+────────────────────────────────────────────────────────────────────────────────
+
+Users can export "My Clippings.txt" from their Kindle and upload it.
+This file contains highlights, notes, and bookmarks with book titles.
+
+FILE: backend/services/kindle_import_service.py
+
+import re
+from dataclasses import dataclass
+
+
+@dataclass
+class KindleClipping:
+    title: str
+    author: str | None
+    clipping_type: str  # "Highlight", "Note", "Bookmark"
+    location: str | None
+    date: str | None
+    content: str | None
+
+
+def parse_kindle_clippings(content: str) -> list[KindleClipping]:
+    """Parse Kindle 'My Clippings.txt' format.
+
+    Format:
+        Book Title (Author Name)
+        - Your Highlight on page X | location X-X | Added on Date
+
+        Highlighted text content
+        ==========
+    """
+    clippings = []
+    entries = content.split("==========")
+
+    for entry in entries:
+        entry = entry.strip()
+        if not entry:
+            continue
+
+        lines = entry.split("\n")
+        if len(lines) < 2:
+            continue
+
+        # Line 1: "Book Title (Author Name)" or "Book Title"
+        title_line = lines[0].strip()
+        author = None
+        title = title_line
+
+        # Extract author from parentheses at end
+        author_match = re.search(r'\(([^)]+)\)\s*$', title_line)
+        if author_match:
+            author = author_match.group(1)
+            title = title_line[:author_match.start()].strip()
+
+        # Line 2: "- Your Highlight on page X | location X-X | Added on Date"
+        meta_line = lines[1].strip() if len(lines) > 1 else ""
+        clipping_type = "Highlight"
+        if "Bookmark" in meta_line:
+            clipping_type = "Bookmark"
+        elif "Note" in meta_line:
+            clipping_type = "Note"
+
+        # Remaining lines: content
+        content_text = "\n".join(lines[3:]).strip() if len(lines) > 3 else None
+
+        clippings.append(KindleClipping(
+            title=title,
+            author=author,
+            clipping_type=clipping_type,
+            location=meta_line,
+            date=None,
+            content=content_text,
+        ))
+
+    return clippings
+
+
+async def import_kindle_clippings(
+    db, user_id, content: str
+) -> dict:
+    """Import Kindle clippings: extract unique books, match to catalog, log as 'reading'."""
+    clippings = parse_kindle_clippings(content)
+
+    # Extract unique books
+    unique_books = {}
+    for clip in clippings:
+        key = (clip.title, clip.author)
+        if key not in unique_books:
+            unique_books[key] = {"title": clip.title, "author": clip.author, "clips": 0}
+        unique_books[key]["clips"] += 1
+
+    matched = 0
+    unmatched = 0
+
+    for (title, author), info in unique_books.items():
+        # Use existing import matching waterfall: exact title → fuzzy
+        # Log matched books as "reading" (has highlights = currently reading)
+        # ...
+        pass
+
+    return {"total_books": len(unique_books), "matched": matched, "unmatched": unmatched}
+
+
+API ENDPOINT:
+
+    POST /api/v1/me/import/kindle
+    Content-Type: multipart/form-data
+    Body: file=@My Clippings.txt
+
+────────────────────────────────────────────────────────────────────────────────
+B. Kobo Export Import
+────────────────────────────────────────────────────────────────────────────────
+
+Kobo stores reading data in a SQLite database (KoboReader.sqlite).
+Users can export this file from their device.
+
+FILE: backend/services/kobo_import_service.py
+
+import sqlite3
+import tempfile
+
+
+async def import_kobo_db(db, user_id, file_content: bytes) -> dict:
+    """Import from Kobo's KoboReader.sqlite export.
+
+    Relevant tables:
+      - content: BookID, Title, Attribution (author), ReadStatus, ___PercentRead
+      - Bookmark: BookmarkID, ContentID, Text (highlights)
+    """
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=True) as tmp:
+        tmp.write(file_content)
+        tmp.flush()
+
+        conn = sqlite3.connect(tmp.name)
+        cursor = conn.cursor()
+
+        # Get books with reading progress
+        cursor.execute("""
+            SELECT Title, Attribution, ReadStatus, ___PercentRead
+            FROM content
+            WHERE BookTitle IS NOT NULL
+            AND ContentType = 6
+            ORDER BY ___PercentRead DESC
+        """)
+
+        books = []
+        for title, author, read_status, percent in cursor.fetchall():
+            status = "read" if percent and percent >= 99 else "reading"
+            books.append({
+                "title": title,
+                "author": author,
+                "status": status,
+                "percent": percent,
+            })
+
+        conn.close()
+
+    # Match books to catalog using import waterfall
+    matched = 0
+    for book in books:
+        # ... match and log
+        pass
+
+    return {"total_books": len(books), "matched": matched}
+
+
+API ENDPOINT:
+
+    POST /api/v1/me/import/kobo
+    Content-Type: multipart/form-data
+    Body: file=@KoboReader.sqlite
+
+────────────────────────────────────────────────────────────────────────────────
+C. Apple Books Integration via Shortcuts
+────────────────────────────────────────────────────────────────────────────────
+
+Apple Books has no API, but iOS Shortcuts can access Books data.
+
+Approach:
+  1. Create an Apple Shortcut that:
+     - Queries the Books library
+     - Extracts title, author, reading status
+     - Sends data to our API endpoint
+  2. User adds the Shortcut and runs it manually or on a schedule
+
+FILE: ios/Shelf/Views/Import/AppleBooksImportView.swift
+
+    // View explaining the Apple Books import process:
+    // 1. "Install Shortcut" button → opens the Shortcut URL
+    // 2. "Run Shortcut" instructions
+    // 3. After shortcut runs, books appear in Shelf
+
+The shortcut itself is distributed as a .shortcut file or iCloud link.
+It collects Books library data and POSTs to:
+
+    POST /api/v1/me/import/apple-books
+    Body: { "books": [{"title": "...", "author": "...", "status": "..."}] }
+
+
+────────────────────────────────────────────────────────────────────────────────
+iOS: Import Source Picker
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: ios/Shelf/Views/Import/ImportView.swift  (modification)
+
+Add new import sources to the existing import view:
+
+    // Existing:
+    ImportSourceRow(title: "Goodreads", icon: "star.fill", description: "Import from CSV export")
+    ImportSourceRow(title: "StoryGraph", icon: "book.fill", description: "Import from CSV export")
+
+    // New:
+    ImportSourceRow(title: "Kindle", icon: "text.quote", description: "Import from My Clippings.txt")
+    ImportSourceRow(title: "Kobo", icon: "book.closed.fill", description: "Import from KoboReader.sqlite")
+    ImportSourceRow(title: "Apple Books", icon: "apple.logo", description: "Via Shortcuts integration")
+
+
+================================================================================
+IMPLEMENTATION PRIORITY
+================================================================================
+
+| Priority | Feature              | Effort  | User Value | Dependencies        |
+|----------|----------------------|---------|------------|---------------------|
+| P1       | Reading Challenges   | 3 days  | High       | None                |
+| P2       | Book Series          | 5 days  | High       | Pipeline changes    |
+| P2       | Kindle Import        | 2 days  | Medium     | None                |
+| P3       | Kobo Import          | 2 days  | Low-Medium | None                |
+| P3       | Apple Books Shortcut | 3 days  | Medium     | Shortcut authoring  |
+
+Reading challenges should come first — it's self-contained, high user value,
+and drives engagement (daily active use to track progress).
+
+Series is high value but requires pipeline changes to import series data
+from Open Library, which makes it a larger effort.
+
+E-reader imports are nice-to-have for launch but not blockers.

@@ -73,6 +73,8 @@ struct RefreshRequest: Codable {
 enum ImportSource: String, Codable {
     case goodreads
     case storygraph
+    case kindle
+    case kobo
 }
 
 struct ImportStatus: Codable {

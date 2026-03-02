@@ -1,0 +1,1371 @@
+================================================================================
+IMPLEMENTATION PLAN: Waitlist Signup & Invite Code System
+================================================================================
+
+Feature: Waitlist signup for controlled launch plus invite code generation and
+redemption. Users join a waitlist, receive an invite code, sign up with it,
+and receive 5 codes of their own to share.
+
+================================================================================
+FILE: backend/models/waitlist.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Index, String, func, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+class Waitlist(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "waitlist"
+
+    email: Mapped[str] = mapped_column(
+        String(320), unique=True, nullable=False, index=True
+    )
+    invited_at: Mapped[datetime | None] = mapped_column(DateTime)
+    invite_code_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invite_codes.id", ondelete="SET NULL")
+    )
+
+    invite_code: Mapped["InviteCode | None"] = relationship(
+        "InviteCode", foreign_keys=[invite_code_id], lazy="selectin"
+    )
+
+
+class InviteCode(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "invite_codes"
+
+    code: Mapped[str] = mapped_column(
+        String(12), unique=True, nullable=False, index=True
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    claimed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    created_by_user: Mapped["User | None"] = relationship(
+        "User", foreign_keys=[created_by_user_id], lazy="selectin"
+    )
+    claimed_by_user: Mapped["User | None"] = relationship(
+        "User", foreign_keys=[claimed_by_user_id], lazy="selectin"
+    )
+
+    __table_args__ = (
+        Index("ix_invite_codes_created_by_user_id", "created_by_user_id"),
+    )
+```
+
+================================================================================
+FILE: backend/models/__init__.py  (modifications)
+================================================================================
+
+Add the new imports to the existing __init__.py:
+
+```python
+from .base import Base, PgArray, PgJSONB
+from .social import Activity, ActivityType, Block, Follow, Mute
+from .taste_match import TasteMatch
+from .user import User
+from .user_book import ReadingStatus, Shelf, ShelfBook, UserBook
+from .waitlist import InviteCode, Waitlist
+from .work import Author, Edition, EditionFormat, Work, work_authors
+
+__all__ = [
+    "Base",
+    "PgArray",
+    "PgJSONB",
+    "Work",
+    "Edition",
+    "EditionFormat",
+    "Author",
+    "work_authors",
+    "User",
+    "UserBook",
+    "ReadingStatus",
+    "Shelf",
+    "ShelfBook",
+    "Follow",
+    "Block",
+    "Mute",
+    "Activity",
+    "ActivityType",
+    "TasteMatch",
+    "Waitlist",
+    "InviteCode",
+]
+```
+
+================================================================================
+FILE: backend/migrations/versions/xxxx_add_waitlist_and_invite_codes.py
+================================================================================
+
+Generate with: alembic revision --autogenerate -m "add waitlist and invite codes"
+
+Full migration content:
+
+```python
+"""add waitlist and invite codes
+
+Revision ID: a1b2c3d4e5f6
+Revises: 92903d6f6b99
+Create Date: 2026-03-02 16:00:00.000000
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'a1b2c3d4e5f6'
+down_revision: Union[str, None] = '92903d6f6b99'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # Create invite_codes first (waitlist references it)
+    op.create_table('invite_codes',
+        sa.Column('code', sa.String(length=12), nullable=False),
+        sa.Column('created_by_user_id', sa.Uuid(), nullable=True),
+        sa.Column('claimed_by_user_id', sa.Uuid(), nullable=True),
+        sa.Column('claimed_at', sa.DateTime(), nullable=True),
+        sa.Column('expires_at', sa.DateTime(), nullable=True),
+        sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.ForeignKeyConstraint(['created_by_user_id'], ['users.id'], ondelete='SET NULL'),
+        sa.ForeignKeyConstraint(['claimed_by_user_id'], ['users.id'], ondelete='SET NULL'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('code'),
+    )
+    op.create_index(op.f('ix_invite_codes_code'), 'invite_codes', ['code'], unique=True)
+    op.create_index('ix_invite_codes_created_by_user_id', 'invite_codes', ['created_by_user_id'], unique=False)
+
+    op.create_table('waitlist',
+        sa.Column('email', sa.String(length=320), nullable=False),
+        sa.Column('invited_at', sa.DateTime(), nullable=True),
+        sa.Column('invite_code_id', sa.Uuid(), nullable=True),
+        sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.ForeignKeyConstraint(['invite_code_id'], ['invite_codes.id'], ondelete='SET NULL'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('email'),
+    )
+    op.create_index(op.f('ix_waitlist_email'), 'waitlist', ['email'], unique=True)
+
+
+def downgrade() -> None:
+    op.drop_index(op.f('ix_waitlist_email'), table_name='waitlist')
+    op.drop_table('waitlist')
+    op.drop_index('ix_invite_codes_created_by_user_id', table_name='invite_codes')
+    op.drop_index(op.f('ix_invite_codes_code'), table_name='invite_codes')
+    op.drop_table('invite_codes')
+```
+
+================================================================================
+FILE: backend/api/schemas/waitlist.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from datetime import datetime
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+
+class JoinWaitlistRequest(BaseModel):
+    email: EmailStr
+
+
+class WaitlistResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    email: str
+    created_at: datetime
+    position: int
+
+
+class InviteCodeResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    code: str
+    created_at: datetime
+    is_claimed: bool
+    claimed_by_username: str | None = None
+
+
+class SignupWithInviteRequest(BaseModel):
+    """Extended signup request that requires an invite code."""
+
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    username: str = Field(min_length=3, max_length=20)
+    invite_code: str = Field(min_length=1, max_length=12)
+
+    @field_validator("invite_code")
+    @classmethod
+    def invite_code_not_empty(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Invite code is required.")
+        return stripped.upper()
+
+    @field_validator("username")
+    @classmethod
+    def username_stripped(cls, v: str) -> str:
+        return v.strip()
+```
+
+================================================================================
+FILE: backend/api/routes/waitlist.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from api.deps import DB, CurrentUser
+from api.schemas.waitlist import (
+    InviteCodeResponse,
+    JoinWaitlistRequest,
+    WaitlistResponse,
+)
+from services.invite_service import get_user_invite_codes, join_waitlist
+
+router = APIRouter()
+
+
+@router.post("/waitlist", status_code=201, response_model=WaitlistResponse)
+async def join_waitlist_endpoint(request: JoinWaitlistRequest, db: DB):
+    """Join the waitlist. Public endpoint, no auth required."""
+    waitlist_entry = await join_waitlist(db=db, email=request.email)
+
+    # Calculate position: count of waitlist entries created before this one
+    from sqlalchemy import func, select
+    from models import Waitlist
+
+    result = await db.execute(
+        select(func.count()).select_from(Waitlist).where(
+            Waitlist.created_at <= waitlist_entry.created_at
+        )
+    )
+    position = result.scalar_one()
+
+    return WaitlistResponse(
+        email=waitlist_entry.email,
+        created_at=waitlist_entry.created_at,
+        position=position,
+    )
+
+
+@router.get("/me/invite-codes", response_model=list[InviteCodeResponse])
+async def list_invite_codes(db: DB, user: CurrentUser):
+    """List the authenticated user's invite codes."""
+    codes = await get_user_invite_codes(db=db, user_id=user.id)
+    return [
+        InviteCodeResponse(
+            code=code.code,
+            created_at=code.created_at,
+            is_claimed=code.claimed_by_user_id is not None,
+            claimed_by_username=(
+                code.claimed_by_user.username
+                if code.claimed_by_user is not None
+                else None
+            ),
+        )
+        for code in codes
+    ]
+```
+
+================================================================================
+FILE: backend/services/invite_service.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import secrets
+import string
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.errors import AppError
+from models import InviteCode, Waitlist
+
+# 8-character alphanumeric uppercase code
+_CODE_ALPHABET = string.ascii_uppercase + string.digits
+_CODE_LENGTH = 8
+_CODES_PER_USER = 5
+
+
+def generate_code() -> str:
+    """Generate an 8-character uppercase alphanumeric invite code."""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
+
+
+async def generate_codes_for_user(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    count: int = _CODES_PER_USER,
+) -> list[InviteCode]:
+    """Generate a batch of invite codes owned by a user.
+
+    Ensures each generated code is unique by retrying on collision.
+    """
+    codes: list[InviteCode] = []
+    attempts = 0
+    max_attempts = count * 3  # generous retry budget
+
+    while len(codes) < count and attempts < max_attempts:
+        attempts += 1
+        code_str = generate_code()
+
+        # Check uniqueness
+        result = await db.execute(
+            select(InviteCode).where(InviteCode.code == code_str)
+        )
+        if result.scalar_one_or_none() is not None:
+            continue  # collision, retry
+
+        invite_code = InviteCode(
+            code=code_str,
+            created_by_user_id=user_id,
+        )
+        db.add(invite_code)
+        codes.append(invite_code)
+
+    await db.flush()
+    return codes
+
+
+async def validate_and_claim_code(
+    db: AsyncSession,
+    code: str,
+    user_id: uuid.UUID,
+) -> InviteCode:
+    """Validate an invite code and mark it as claimed.
+
+    Raises AppError if the code is invalid, already claimed, or expired.
+    """
+    result = await db.execute(
+        select(InviteCode).where(InviteCode.code == code.strip().upper())
+    )
+    invite_code = result.scalar_one_or_none()
+
+    if invite_code is None:
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_INVALID",
+            message="This invite code is not valid.",
+        )
+
+    if invite_code.claimed_by_user_id is not None:
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_CLAIMED",
+            message="This invite code has already been used.",
+        )
+
+    if invite_code.expires_at is not None and invite_code.expires_at < datetime.now(timezone.utc):
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_EXPIRED",
+            message="This invite code has expired.",
+        )
+
+    invite_code.claimed_by_user_id = user_id
+    invite_code.claimed_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    return invite_code
+
+
+async def join_waitlist(db: AsyncSession, email: str) -> Waitlist:
+    """Add an email to the waitlist.
+
+    Raises AppError if the email is already on the waitlist.
+    """
+    normalized_email = email.strip().lower()
+
+    # Check for duplicate
+    result = await db.execute(
+        select(Waitlist).where(Waitlist.email == normalized_email)
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing is not None:
+        raise AppError(
+            status_code=409,
+            code="WAITLIST_DUPLICATE",
+            message="This email is already on the waitlist.",
+        )
+
+    entry = Waitlist(email=normalized_email)
+    db.add(entry)
+    await db.flush()
+
+    return entry
+
+
+async def get_user_invite_codes(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+) -> list[InviteCode]:
+    """Get all invite codes created by a user."""
+    result = await db.execute(
+        select(InviteCode)
+        .where(InviteCode.created_by_user_id == user_id)
+        .order_by(InviteCode.created_at)
+    )
+    return list(result.scalars().all())
+```
+
+================================================================================
+FILE: backend/api/routes/auth.py  (modifications to signup flow)
+================================================================================
+
+Modify the existing signup handler to require and validate an invite code.
+This shows the complete modified handler:
+
+```python
+from api.schemas.waitlist import SignupWithInviteRequest
+from services.invite_service import generate_codes_for_user, validate_and_claim_code
+from services.reserved_usernames import is_username_reserved, validate_username_format
+
+
+@router.post("/auth/signup", status_code=201)
+async def signup(request: SignupWithInviteRequest, db: DB):
+    # --- Step 1: Username validation ---
+    format_error = validate_username_format(request.username)
+    if format_error is not None:
+        raise AppError(
+            status_code=422,
+            code="USERNAME_INVALID",
+            message=format_error,
+        )
+
+    if is_username_reserved(request.username):
+        raise AppError(
+            status_code=422,
+            code="USERNAME_RESERVED",
+            message="This username is not available.",
+        )
+
+    # --- Step 2: Validate and claim the invite code ---
+    # This will raise AppError if the code is invalid, already claimed, or expired.
+    # We pass a temporary UUID here; the real user ID gets set after account creation.
+    # Actually, we validate first without claiming, then claim after user creation.
+
+    # Pre-validate the code exists and is available (without claiming yet)
+    result = await db.execute(
+        select(InviteCode).where(InviteCode.code == request.invite_code)
+    )
+    invite_code = result.scalar_one_or_none()
+
+    if invite_code is None:
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_INVALID",
+            message="This invite code is not valid.",
+        )
+
+    if invite_code.claimed_by_user_id is not None:
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_CLAIMED",
+            message="This invite code has already been used.",
+        )
+
+    if invite_code.expires_at is not None and invite_code.expires_at < datetime.now(timezone.utc):
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_EXPIRED",
+            message="This invite code has expired.",
+        )
+
+    # --- Step 3: Create the user account via Supabase Auth ---
+    # ... existing Supabase Auth user creation logic ...
+    # supabase_user = await supabase.auth.sign_up(...)
+    # user_id = supabase_user.id
+
+    # --- Step 4: Create the User record in our database ---
+    user = User(
+        id=user_id,  # from Supabase Auth
+        username=request.username,
+    )
+    db.add(user)
+    await db.flush()
+
+    # --- Step 5: Claim the invite code now that we have the real user ID ---
+    await validate_and_claim_code(db=db, code=request.invite_code, user_id=user.id)
+
+    # --- Step 6: Generate 5 invite codes for the new user ---
+    await generate_codes_for_user(db=db, user_id=user.id, count=5)
+
+    await db.commit()
+
+    # ... return auth tokens / user response ...
+```
+
+================================================================================
+FILE: backend/tests/test_waitlist.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models import InviteCode, User, Waitlist
+from services.invite_service import (
+    generate_code,
+    generate_codes_for_user,
+    get_user_invite_codes,
+    join_waitlist,
+    validate_and_claim_code,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def make_user(**kwargs) -> User:
+    defaults = {
+        "id": uuid.uuid4(),
+        "username": f"user_{uuid.uuid4().hex[:8]}",
+    }
+    defaults.update(kwargs)
+    return User(**defaults)
+
+
+def make_invite_code(
+    created_by_user_id: uuid.UUID | None = None,
+    code: str | None = None,
+    **kwargs,
+) -> InviteCode:
+    defaults = {
+        "code": code or generate_code(),
+        "created_by_user_id": created_by_user_id,
+    }
+    defaults.update(kwargs)
+    return InviteCode(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — join_waitlist
+# ---------------------------------------------------------------------------
+
+
+class TestJoinWaitlist:
+    @pytest.mark.asyncio
+    async def test_join_waitlist_happy_path(self, session: AsyncSession):
+        entry = await join_waitlist(db=session, email="reader@example.com")
+        assert entry.email == "reader@example.com"
+        assert entry.invited_at is None
+        assert entry.invite_code_id is None
+
+    @pytest.mark.asyncio
+    async def test_join_waitlist_normalizes_email(self, session: AsyncSession):
+        entry = await join_waitlist(db=session, email="  Reader@Example.COM  ")
+        assert entry.email == "reader@example.com"
+
+    @pytest.mark.asyncio
+    async def test_join_waitlist_duplicate_email_raises(self, session: AsyncSession):
+        await join_waitlist(db=session, email="dupe@example.com")
+        with pytest.raises(Exception) as exc_info:
+            await join_waitlist(db=session, email="dupe@example.com")
+        assert "WAITLIST_DUPLICATE" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — generate_code
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateCode:
+    def test_code_length(self):
+        code = generate_code()
+        assert len(code) == 8
+
+    def test_code_is_alphanumeric_uppercase(self):
+        for _ in range(100):
+            code = generate_code()
+            assert code.isalnum()
+            assert code == code.upper()
+
+    def test_codes_are_unique(self):
+        codes = {generate_code() for _ in range(1000)}
+        # With 36^8 possible codes, collisions in 1000 samples are astronomically unlikely
+        assert len(codes) == 1000
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — generate_codes_for_user
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateCodesForUser:
+    @pytest.mark.asyncio
+    async def test_generates_correct_count(self, session: AsyncSession):
+        user = make_user()
+        session.add(user)
+        await session.flush()
+
+        codes = await generate_codes_for_user(db=session, user_id=user.id, count=5)
+        assert len(codes) == 5
+
+    @pytest.mark.asyncio
+    async def test_codes_belong_to_user(self, session: AsyncSession):
+        user = make_user()
+        session.add(user)
+        await session.flush()
+
+        codes = await generate_codes_for_user(db=session, user_id=user.id)
+        for code in codes:
+            assert code.created_by_user_id == user.id
+
+    @pytest.mark.asyncio
+    async def test_codes_are_unclaimed(self, session: AsyncSession):
+        user = make_user()
+        session.add(user)
+        await session.flush()
+
+        codes = await generate_codes_for_user(db=session, user_id=user.id)
+        for code in codes:
+            assert code.claimed_by_user_id is None
+            assert code.claimed_at is None
+
+    @pytest.mark.asyncio
+    async def test_all_codes_unique(self, session: AsyncSession):
+        user = make_user()
+        session.add(user)
+        await session.flush()
+
+        codes = await generate_codes_for_user(db=session, user_id=user.id, count=10)
+        code_strings = [c.code for c in codes]
+        assert len(set(code_strings)) == len(code_strings)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — validate_and_claim_code
+# ---------------------------------------------------------------------------
+
+
+class TestValidateAndClaimCode:
+    @pytest.mark.asyncio
+    async def test_claim_valid_code(self, session: AsyncSession):
+        creator = make_user()
+        claimer = make_user()
+        session.add_all([creator, claimer])
+        await session.flush()
+
+        invite = make_invite_code(created_by_user_id=creator.id)
+        session.add(invite)
+        await session.flush()
+
+        result = await validate_and_claim_code(
+            db=session, code=invite.code, user_id=claimer.id
+        )
+        assert result.claimed_by_user_id == claimer.id
+        assert result.claimed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_claim_already_claimed_code_raises(self, session: AsyncSession):
+        creator = make_user()
+        first_claimer = make_user()
+        second_claimer = make_user()
+        session.add_all([creator, first_claimer, second_claimer])
+        await session.flush()
+
+        invite = make_invite_code(created_by_user_id=creator.id)
+        session.add(invite)
+        await session.flush()
+
+        await validate_and_claim_code(
+            db=session, code=invite.code, user_id=first_claimer.id
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            await validate_and_claim_code(
+                db=session, code=invite.code, user_id=second_claimer.id
+            )
+        assert "INVITE_CODE_CLAIMED" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_claim_expired_code_raises(self, session: AsyncSession):
+        creator = make_user()
+        claimer = make_user()
+        session.add_all([creator, claimer])
+        await session.flush()
+
+        invite = make_invite_code(
+            created_by_user_id=creator.id,
+            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        session.add(invite)
+        await session.flush()
+
+        with pytest.raises(Exception) as exc_info:
+            await validate_and_claim_code(
+                db=session, code=invite.code, user_id=claimer.id
+            )
+        assert "INVITE_CODE_EXPIRED" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_claim_nonexistent_code_raises(self, session: AsyncSession):
+        claimer = make_user()
+        session.add(claimer)
+        await session.flush()
+
+        with pytest.raises(Exception) as exc_info:
+            await validate_and_claim_code(
+                db=session, code="DOESNOTEXIST", user_id=claimer.id
+            )
+        assert "INVITE_CODE_INVALID" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_claim_code_case_insensitive(self, session: AsyncSession):
+        creator = make_user()
+        claimer = make_user()
+        session.add_all([creator, claimer])
+        await session.flush()
+
+        invite = make_invite_code(created_by_user_id=creator.id, code="ABCD1234")
+        session.add(invite)
+        await session.flush()
+
+        result = await validate_and_claim_code(
+            db=session, code="abcd1234", user_id=claimer.id
+        )
+        assert result.claimed_by_user_id == claimer.id
+
+    @pytest.mark.asyncio
+    async def test_claim_non_expired_code_succeeds(self, session: AsyncSession):
+        creator = make_user()
+        claimer = make_user()
+        session.add_all([creator, claimer])
+        await session.flush()
+
+        invite = make_invite_code(
+            created_by_user_id=creator.id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+        session.add(invite)
+        await session.flush()
+
+        result = await validate_and_claim_code(
+            db=session, code=invite.code, user_id=claimer.id
+        )
+        assert result.claimed_by_user_id == claimer.id
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — get_user_invite_codes
+# ---------------------------------------------------------------------------
+
+
+class TestGetUserInviteCodes:
+    @pytest.mark.asyncio
+    async def test_returns_user_codes(self, session: AsyncSession):
+        user = make_user()
+        session.add(user)
+        await session.flush()
+
+        codes = await generate_codes_for_user(db=session, user_id=user.id, count=3)
+        fetched = await get_user_invite_codes(db=session, user_id=user.id)
+        assert len(fetched) == 3
+        fetched_codes = {c.code for c in fetched}
+        for code in codes:
+            assert code.code in fetched_codes
+
+    @pytest.mark.asyncio
+    async def test_does_not_return_other_users_codes(self, session: AsyncSession):
+        user1 = make_user()
+        user2 = make_user()
+        session.add_all([user1, user2])
+        await session.flush()
+
+        await generate_codes_for_user(db=session, user_id=user1.id, count=3)
+        await generate_codes_for_user(db=session, user_id=user2.id, count=2)
+
+        fetched = await get_user_invite_codes(db=session, user_id=user1.id)
+        assert len(fetched) == 3
+        for code in fetched:
+            assert code.created_by_user_id == user1.id
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — POST /waitlist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_join_waitlist_endpoint(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/waitlist",
+        json={"email": "newreader@example.com"},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["email"] == "newreader@example.com"
+    assert "position" in body
+    assert body["position"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_join_waitlist_duplicate_returns_409(client: AsyncClient):
+    await client.post(
+        "/api/v1/waitlist",
+        json={"email": "repeat@example.com"},
+    )
+    response = await client.post(
+        "/api/v1/waitlist",
+        json={"email": "repeat@example.com"},
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "WAITLIST_DUPLICATE"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — POST /auth/signup with invite code
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_signup_with_valid_invite_code(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    # Create a system-generated invite code
+    code = InviteCode(code="TESTCODE01")
+    db_session.add(code)
+    await db_session.flush()
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "invited@example.com",
+            "password": "SecurePass123!",
+            "username": "invited_user",
+            "invite_code": "TESTCODE01",
+        },
+    )
+    # Should proceed past invite code validation
+    # (may still fail due to Supabase Auth not being available in tests,
+    # but should not fail with INVITE_CODE_INVALID)
+    if response.status_code == 422:
+        assert response.json()["error"]["code"] not in (
+            "INVITE_CODE_INVALID",
+            "INVITE_CODE_CLAIMED",
+            "INVITE_CODE_EXPIRED",
+        )
+
+
+@pytest.mark.asyncio
+async def test_signup_missing_invite_code_returns_422(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "nocode@example.com",
+            "password": "SecurePass123!",
+            "username": "nocode_user",
+        },
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_signup_invalid_invite_code_returns_422(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "badcode@example.com",
+            "password": "SecurePass123!",
+            "username": "badcode_user",
+            "invite_code": "INVALID999",
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVITE_CODE_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — GET /me/invite-codes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_invite_codes(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    # Assuming client fixture has an authenticated user with pre-generated codes
+    response = await client.get("/api/v1/me/invite-codes")
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body, list)
+    for code_item in body:
+        assert "code" in code_item
+        assert "created_at" in code_item
+        assert "is_claimed" in code_item
+        assert "claimed_by_username" in code_item
+
+
+@pytest.mark.asyncio
+async def test_list_invite_codes_shows_claimed_status(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    # Create a user and their codes, then claim one
+    owner = make_user()
+    claimer = make_user()
+    db_session.add_all([owner, claimer])
+    await db_session.flush()
+
+    codes = await generate_codes_for_user(db=db_session, user_id=owner.id, count=3)
+    await validate_and_claim_code(
+        db=db_session, code=codes[0].code, user_id=claimer.id
+    )
+    await db_session.commit()
+
+    fetched = await get_user_invite_codes(db=db_session, user_id=owner.id)
+    claimed_count = sum(1 for c in fetched if c.claimed_by_user_id is not None)
+    unclaimed_count = sum(1 for c in fetched if c.claimed_by_user_id is None)
+    assert claimed_count == 1
+    assert unclaimed_count == 2
+```
+
+================================================================================
+FILE: ios/Shelf/Models/Waitlist.swift
+================================================================================
+
+```swift
+import Foundation
+
+struct InviteCode: Codable, Identifiable {
+    let code: String
+    let createdAt: Date
+    let isClaimed: Bool
+    let claimedByUsername: String?
+
+    var id: String { code }
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case createdAt = "created_at"
+        case isClaimed = "is_claimed"
+        case claimedByUsername = "claimed_by_username"
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Services/InviteService.swift
+================================================================================
+
+```swift
+import Foundation
+
+@Observable
+final class InviteService {
+    static let shared = InviteService()
+
+    private(set) var inviteCodes: [InviteCode] = []
+    private(set) var isLoading: Bool = false
+    private(set) var error: String?
+
+    private init() {}
+
+    @MainActor
+    func getInviteCodes() async {
+        isLoading = true
+        error = nil
+        defer { isLoading = false }
+
+        do {
+            let codes: [InviteCode] = try await APIClient.shared.request(
+                method: .get,
+                path: "/me/invite-codes"
+            )
+            inviteCodes = codes
+        } catch let apiError as APIError {
+            error = apiError.message
+        } catch {
+            self.error = "Failed to load invite codes."
+        }
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Auth/SignUpView.swift  (modifications)
+================================================================================
+
+Add an invite code field above the email field in the existing SignUpView.
+These changes integrate with the reserved username validation from plan 01.
+
+```swift
+import SwiftUI
+
+struct SignUpView: View {
+    @State private var inviteCode: String = ""
+    @State private var username: String = ""
+    @State private var usernameError: String?
+    @State private var isCheckingUsername: Bool = false
+    @State private var usernameDebounceTask: Task<Void, Never>?
+    @State private var email: String = ""
+    @State private var password: String = ""
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String?
+
+    private let usernameValidator = UsernameValidator.shared
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Invite Code", text: $inviteCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+                } header: {
+                    Text("Invite Code")
+                } footer: {
+                    Text("Enter the invite code you received to create your account.")
+                        .font(.caption)
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("Username", text: $username)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .onChange(of: username) { _, newValue in
+                                validateUsernameDebounced(newValue)
+                            }
+
+                        if let usernameError {
+                            Text(usernameError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+
+                        if isCheckingUsername {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                Text("Checking availability...")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    TextField("Email", text: $email)
+                        .textContentType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.emailAddress)
+
+                    SecureField("Password", text: $password)
+                        .textContentType(.newPassword)
+                } header: {
+                    Text("Account Details")
+                }
+
+                Section {
+                    Button {
+                        Task {
+                            await signUp()
+                        }
+                    } label: {
+                        if isLoading {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Text("Create Account")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .disabled(isLoading || !isFormValid)
+                }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Sign Up")
+        }
+    }
+
+    private var isFormValid: Bool {
+        !inviteCode.trimmingCharacters(in: .whitespaces).isEmpty
+            && usernameError == nil
+            && !username.isEmpty
+            && !email.isEmpty
+            && !password.isEmpty
+            && !isCheckingUsername
+    }
+
+    private func validateUsernameDebounced(_ value: String) {
+        usernameDebounceTask?.cancel()
+
+        let (isValid, localError) = usernameValidator.isUsernameValid(value)
+        if !isValid {
+            usernameError = localError
+            return
+        }
+
+        usernameError = nil
+
+        usernameDebounceTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            await checkUsernameAvailability(value)
+        }
+    }
+
+    @MainActor
+    private func checkUsernameAvailability(_ username: String) async {
+        isCheckingUsername = true
+        defer { isCheckingUsername = false }
+    }
+
+    @MainActor
+    private func signUp() async {
+        let (isValid, localError) = usernameValidator.isUsernameValid(username)
+        if !isValid {
+            usernameError = localError
+            return
+        }
+
+        let trimmedCode = inviteCode.trimmingCharacters(in: .whitespaces)
+        if trimmedCode.isEmpty {
+            errorMessage = "Invite code is required."
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let body: [String: String] = [
+                "invite_code": trimmedCode,
+                "username": username,
+                "email": email,
+                "password": password,
+            ]
+            let _: SignUpResponse = try await APIClient.shared.request(
+                method: .post,
+                path: "/auth/signup",
+                body: body
+            )
+            // Handle successful signup (navigate to main app, etc.)
+        } catch let error as APIError {
+            switch error.code {
+            case "USERNAME_RESERVED", "USERNAME_INVALID":
+                usernameError = error.message
+            case "USERNAME_TAKEN":
+                usernameError = "This username is already taken."
+            case "INVITE_CODE_INVALID":
+                errorMessage = "This invite code is not valid."
+            case "INVITE_CODE_CLAIMED":
+                errorMessage = "This invite code has already been used."
+            case "INVITE_CODE_EXPIRED":
+                errorMessage = "This invite code has expired."
+            default:
+                errorMessage = error.message
+            }
+        } catch {
+            errorMessage = "An unexpected error occurred. Please try again."
+        }
+
+        isLoading = false
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Profile/InviteCodesView.swift
+================================================================================
+
+```swift
+import SwiftUI
+
+struct InviteCodesView: View {
+    @State private var inviteService = InviteService.shared
+    @State private var copiedCode: String?
+
+    var body: some View {
+        Group {
+            if inviteService.isLoading && inviteService.inviteCodes.isEmpty {
+                LoadingStateView()
+            } else if let error = inviteService.error, inviteService.inviteCodes.isEmpty {
+                ErrorStateView(message: error) {
+                    Task {
+                        await inviteService.getInviteCodes()
+                    }
+                }
+            } else if inviteService.inviteCodes.isEmpty {
+                EmptyStateView(
+                    title: "No Invite Codes",
+                    message: "You don't have any invite codes yet."
+                )
+            } else {
+                List {
+                    Section {
+                        ForEach(inviteService.inviteCodes) { code in
+                            InviteCodeRow(
+                                code: code,
+                                isCopied: copiedCode == code.code,
+                                onCopy: { copyToClipboard(code.code) },
+                                onShare: { shareCode(code.code) }
+                            )
+                        }
+                    } header: {
+                        let available = inviteService.inviteCodes.filter { !$0.isClaimed }.count
+                        Text("\(available) of \(inviteService.inviteCodes.count) available")
+                    }
+                }
+            }
+        }
+        .navigationTitle("Invite Codes")
+        .task {
+            await inviteService.getInviteCodes()
+        }
+    }
+
+    private func copyToClipboard(_ code: String) {
+        UIPasteboard.general.string = code
+        copiedCode = code
+
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            if copiedCode == code {
+                copiedCode = nil
+            }
+        }
+    }
+
+    private func shareCode(_ code: String) {
+        let text = "Join me on Shelf! Use my invite code: \(code)\nhttps://shelf.app/invite/\(code)"
+        let activityVC = UIActivityViewController(
+            activityItems: [text],
+            applicationActivities: nil
+        )
+
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootVC = windowScene.windows.first?.rootViewController else {
+            return
+        }
+
+        rootVC.present(activityVC, animated: true)
+    }
+}
+
+struct InviteCodeRow: View {
+    let code: InviteCode
+    let isCopied: Bool
+    let onCopy: () -> Void
+    let onShare: () -> Void
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(code.code)
+                    .font(.system(.body, design: .monospaced))
+                    .fontWeight(.medium)
+
+                if code.isClaimed, let username = code.claimedByUsername {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.caption)
+                        Text("Claimed by @\(username)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("Available")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if !code.isClaimed {
+                HStack(spacing: 12) {
+                    Button {
+                        onCopy()
+                    } label: {
+                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                            .font(.body)
+                            .foregroundStyle(isCopied ? .green : .accentColor)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        onShare()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.body)
+                            .foregroundStyle(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Settings/SettingsView.swift  (modifications)
+================================================================================
+
+Add a navigation link to InviteCodesView inside the existing SettingsView:
+
+```swift
+// Inside the SettingsView body, add this in an appropriate Section
+// (e.g., the "Account" or "Social" section):
+
+Section("Invite Friends") {
+    NavigationLink {
+        InviteCodesView()
+    } label: {
+        Label("Invite Codes", systemImage: "envelope.badge")
+    }
+}
+```

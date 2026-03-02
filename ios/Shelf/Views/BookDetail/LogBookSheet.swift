@@ -13,6 +13,7 @@ struct LogBookSheet: View {
     @State private var hasSpoilers = false
     @State private var startedAt: Date? = nil
     @State private var finishedAt: Date? = nil
+    @State private var isPrivate = false
     @State private var showStartDate = false
     @State private var showEndDate = false
 
@@ -26,6 +27,7 @@ struct LogBookSheet: View {
             _rating = State(initialValue: existing.rating ?? 0)
             _reviewText = State(initialValue: existing.reviewText ?? "")
             _hasSpoilers = State(initialValue: existing.hasSpoilers)
+            _isPrivate = State(initialValue: existing.isPrivate)
             _startedAt = State(initialValue: existing.startedAt)
             _finishedAt = State(initialValue: existing.finishedAt)
             _showStartDate = State(initialValue: existing.startedAt != nil)
@@ -104,6 +106,15 @@ struct LogBookSheet: View {
                     Text("Review")
                 }
 
+                // Privacy
+                Section {
+                    Toggle("Private", isOn: $isPrivate)
+                } header: {
+                    Text("Privacy")
+                } footer: {
+                    Text("Private books won't appear in your public library or activity feed.")
+                }
+
                 // Dates
                 Section("Dates") {
                     Toggle("Started reading", isOn: $showStartDate)
@@ -155,6 +166,7 @@ struct LogBookSheet: View {
             rating: rating > 0 ? rating : nil,
             reviewText: reviewText.isEmpty ? nil : reviewText,
             hasSpoilers: hasSpoilers,
+            isPrivate: isPrivate,
             startedAt: showStartDate ? (startedAt ?? Date()) : nil,
             finishedAt: showEndDate ? (finishedAt ?? Date()) : nil
         )

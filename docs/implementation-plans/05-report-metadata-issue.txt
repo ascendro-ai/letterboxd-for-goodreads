@@ -1,0 +1,829 @@
+================================================================================
+IMPLEMENTATION PLAN: Report Metadata Issue
+================================================================================
+
+Feature: "Report an Issue" button on book detail pages that lets users report
+wrong metadata (covers, authors, titles, etc.). Reports feed a manual review
+queue for moderators. Includes per-user rate limiting and duplicate detection.
+
+================================================================================
+FILE: backend/models/report.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import datetime
+
+from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+class IssueType(enum.Enum):
+    WRONG_COVER = "wrong_cover"
+    WRONG_AUTHOR = "wrong_author"
+    WRONG_TITLE = "wrong_title"
+    WRONG_DESCRIPTION = "wrong_description"
+    DUPLICATE = "duplicate"
+    OTHER = "other"
+
+
+class ReportStatus(enum.Enum):
+    OPEN = "open"
+    REVIEWED = "reviewed"
+    RESOLVED = "resolved"
+    DISMISSED = "dismissed"
+
+
+class MetadataReport(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "metadata_reports"
+
+    reporter_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), nullable=False
+    )
+    issue_type: Mapped[IssueType] = mapped_column(nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[ReportStatus] = mapped_column(
+        default=ReportStatus.OPEN, server_default="OPEN"
+    )
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        Index("ix_metadata_reports_work_status", "work_id", "status"),
+    )
+```
+
+================================================================================
+FILE: backend/models/__init__.py  (modifications)
+================================================================================
+
+Add the MetadataReport import and export alongside the existing model imports:
+
+```python
+from .report import IssueType, MetadataReport, ReportStatus
+```
+
+And add to __all__:
+
+```python
+"MetadataReport",
+"IssueType",
+"ReportStatus",
+```
+
+================================================================================
+FILE: backend/api/model_stubs.py  (additions)
+================================================================================
+
+Add the MetadataReport stub model at the bottom of model_stubs.py, after the
+existing ImportJob class:
+
+```python
+class MetadataReport(TimestampMixin, Base):
+    __tablename__ = "metadata_reports"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    reporter_user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    work_id: Mapped[uuid.UUID] = _fk_uuid_col("works.id", index=True)
+    issue_type: Mapped[str] = mapped_column(String(30))
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="OPEN")
+    reviewed_by: Mapped[Optional[uuid.UUID]] = _fk_uuid_col(
+        "users.id", nullable=True, default=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+```
+
+Also add the import in the stub imports at the top of conftest.py:
+
+```python
+from backend.api.model_stubs import (  # noqa: E402
+    Author,
+    Base,
+    Edition,
+    MetadataReport,
+    User,
+    Work,
+)
+```
+
+================================================================================
+FILE: backend/migrations/versions/add_metadata_reports.py
+================================================================================
+
+```python
+"""add metadata_reports table
+
+Revision ID: a1b2c3d4e5f6
+Revises: 92903d6f6b99
+Create Date: 2026-03-02 16:00:00.000000
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'a1b2c3d4e5f6'
+down_revision: Union[str, None] = '92903d6f6b99'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.create_table('metadata_reports',
+        sa.Column('reporter_user_id', sa.Uuid(), nullable=False),
+        sa.Column('work_id', sa.Uuid(), nullable=False),
+        sa.Column('issue_type', sa.Enum(
+            'WRONG_COVER', 'WRONG_AUTHOR', 'WRONG_TITLE',
+            'WRONG_DESCRIPTION', 'DUPLICATE', 'OTHER',
+            name='issuetype',
+        ), nullable=False),
+        sa.Column('description', sa.Text(), nullable=False),
+        sa.Column('status', sa.Enum(
+            'OPEN', 'REVIEWED', 'RESOLVED', 'DISMISSED',
+            name='reportstatus',
+        ), server_default='OPEN', nullable=False),
+        sa.Column('reviewed_by', sa.Uuid(), nullable=True),
+        sa.Column('resolved_at', sa.DateTime(), nullable=True),
+        sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.ForeignKeyConstraint(['reporter_user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['work_id'], ['works.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['reviewed_by'], ['users.id'], ondelete='SET NULL'),
+        sa.PrimaryKeyConstraint('id'),
+    )
+    op.create_index(
+        'ix_metadata_reports_reporter_user_id',
+        'metadata_reports',
+        ['reporter_user_id'],
+        unique=False,
+    )
+    op.create_index(
+        'ix_metadata_reports_work_status',
+        'metadata_reports',
+        ['work_id', 'status'],
+        unique=False,
+    )
+
+
+def downgrade() -> None:
+    op.drop_index('ix_metadata_reports_work_status', table_name='metadata_reports')
+    op.drop_index('ix_metadata_reports_reporter_user_id', table_name='metadata_reports')
+    op.drop_table('metadata_reports')
+    sa.Enum('WRONG_COVER', 'WRONG_AUTHOR', 'WRONG_TITLE',
+            'WRONG_DESCRIPTION', 'DUPLICATE', 'OTHER',
+            name='issuetype').drop(op.get_bind())
+    sa.Enum('OPEN', 'REVIEWED', 'RESOLVED', 'DISMISSED',
+            name='reportstatus').drop(op.get_bind())
+```
+
+================================================================================
+FILE: backend/api/schemas/report.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+
+class IssueType(str, Enum):
+    WRONG_COVER = "wrong_cover"
+    WRONG_AUTHOR = "wrong_author"
+    WRONG_TITLE = "wrong_title"
+    WRONG_DESCRIPTION = "wrong_description"
+    DUPLICATE = "duplicate"
+    OTHER = "other"
+
+
+class ReportStatus(str, Enum):
+    OPEN = "open"
+    REVIEWED = "reviewed"
+    RESOLVED = "resolved"
+    DISMISSED = "dismissed"
+
+
+class ReportIssueRequest(BaseModel):
+    issue_type: IssueType
+    description: str = Field(min_length=10, max_length=1000)
+
+
+class ReportIssueResponse(BaseModel):
+    id: UUID
+    issue_type: IssueType
+    status: ReportStatus
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+```
+
+================================================================================
+FILE: backend/api/errors.py  (additions)
+================================================================================
+
+Add these error factory functions at the bottom of errors.py:
+
+```python
+def work_not_found() -> AppError:
+    return AppError(404, "WORK_NOT_FOUND", "No work found with the given ID.")
+
+
+def duplicate_report() -> AppError:
+    return AppError(409, "DUPLICATE_REPORT", "You already have an open report for this issue on this book.")
+
+
+def report_rate_limited() -> AppError:
+    return AppError(429, "REPORT_RATE_LIMITED", "You have reached the maximum number of reports per day. Please try again tomorrow.")
+```
+
+================================================================================
+FILE: backend/services/report_service.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from uuid import UUID
+
+from backend.api.errors import duplicate_report, report_rate_limited, work_not_found
+from backend.api.model_stubs import MetadataReport, Work
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+DAILY_REPORT_LIMIT = 10
+
+
+async def get_user_report_count_today(db: AsyncSession, user_id: UUID) -> int:
+    """Count reports submitted by a user in the last 24 hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    result = await db.execute(
+        select(func.count())
+        .select_from(MetadataReport)
+        .where(
+            MetadataReport.reporter_user_id == user_id,
+            MetadataReport.created_at >= cutoff,
+        )
+    )
+    return result.scalar() or 0
+
+
+async def report_issue(
+    db: AsyncSession,
+    user_id: UUID,
+    work_id: UUID,
+    issue_type: str,
+    description: str,
+) -> MetadataReport:
+    """Submit a metadata issue report for a work.
+
+    Validates:
+      - Work exists (404 if not)
+      - No existing open report from same user for same work+issue_type (409 if exists)
+      - User has not exceeded daily report limit (429 if exceeded)
+    """
+    # Verify work exists
+    work_result = await db.execute(select(Work.id).where(Work.id == work_id))
+    if work_result.scalar_one_or_none() is None:
+        raise work_not_found()
+
+    # Check for existing open report from same user for same work + issue_type
+    existing_result = await db.execute(
+        select(MetadataReport).where(
+            MetadataReport.reporter_user_id == user_id,
+            MetadataReport.work_id == work_id,
+            MetadataReport.issue_type == issue_type,
+            MetadataReport.status == "OPEN",
+        )
+    )
+    if existing_result.scalar_one_or_none() is not None:
+        raise duplicate_report()
+
+    # Check daily rate limit
+    today_count = await get_user_report_count_today(db, user_id)
+    if today_count >= DAILY_REPORT_LIMIT:
+        raise report_rate_limited()
+
+    # Create the report
+    report = MetadataReport(
+        reporter_user_id=user_id,
+        work_id=work_id,
+        issue_type=issue_type,
+        description=description,
+        status="OPEN",
+    )
+    db.add(report)
+    await db.flush()
+    await db.refresh(report)
+
+    return report
+```
+
+================================================================================
+FILE: backend/api/routes/books.py  (modifications)
+================================================================================
+
+Add these imports at the top of books.py alongside the existing imports:
+
+```python
+from backend.api.schemas.report import ReportIssueRequest, ReportIssueResponse
+from backend.services import report_service
+```
+
+Add this endpoint at the bottom of the books router, after the existing endpoints:
+
+```python
+@router.post("/{work_id}/report", response_model=ReportIssueResponse, status_code=201)
+async def report_metadata_issue(
+    work_id: UUID,
+    request: ReportIssueRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> ReportIssueResponse:
+    """Report a metadata issue on a book (wrong cover, author, title, etc.)."""
+    report = await report_service.report_issue(
+        db,
+        user_id=current_user.id,
+        work_id=work_id,
+        issue_type=request.issue_type.value,
+        description=request.description,
+    )
+    return ReportIssueResponse(
+        id=report.id,
+        issue_type=request.issue_type,
+        status=report.status,
+        created_at=report.created_at,
+    )
+```
+
+================================================================================
+FILE: backend/tests/test_reports.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from backend.api.model_stubs import MetadataReport, Work
+
+
+@pytest.mark.asyncio
+async def test_report_issue_success(client, test_work):
+    """Happy path: submit a metadata report and get back 201."""
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/report",
+        json={
+            "issue_type": "wrong_cover",
+            "description": "The cover image shows the wrong edition of the book.",
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["issue_type"] == "wrong_cover"
+    assert data["status"] == "OPEN"
+    assert "id" in data
+    assert "created_at" in data
+
+
+@pytest.mark.asyncio
+async def test_report_issue_duplicate_returns_409(client, test_work):
+    """Submitting the same issue type for the same work twice returns 409."""
+    payload = {
+        "issue_type": "wrong_author",
+        "description": "The listed author is incorrect, should be Jane Doe.",
+    }
+    resp1 = await client.post(f"/api/v1/books/{test_work.id}/report", json=payload)
+    assert resp1.status_code == 201
+
+    resp2 = await client.post(f"/api/v1/books/{test_work.id}/report", json=payload)
+    assert resp2.status_code == 409
+    assert resp2.json()["detail"]["error"]["code"] == "DUPLICATE_REPORT"
+
+
+@pytest.mark.asyncio
+async def test_report_issue_nonexistent_work_returns_404(client):
+    """Reporting on a work that does not exist returns 404."""
+    fake_id = uuid.uuid4()
+    resp = await client.post(
+        f"/api/v1/books/{fake_id}/report",
+        json={
+            "issue_type": "wrong_title",
+            "description": "This title is completely wrong, please fix it.",
+        },
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["error"]["code"] == "WORK_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_report_issue_rate_limit(client, db_session, test_work, test_user_id):
+    """Submitting more than 10 reports in 24 hours returns 429."""
+    # Create 10 reports directly in the DB to hit the limit
+    for i in range(10):
+        report = MetadataReport(
+            id=str(uuid.uuid4()),
+            reporter_user_id=str(test_user_id),
+            work_id=str(test_work.id),
+            issue_type="other",
+            description=f"Rate limit test report number {i + 1} for testing purposes.",
+            status="OPEN",
+        )
+        db_session.add(report)
+    await db_session.commit()
+
+    # The 11th report via API should be rate limited
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/report",
+        json={
+            "issue_type": "wrong_cover",
+            "description": "This should be rate limited because we hit the daily cap.",
+        },
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["error"]["code"] == "REPORT_RATE_LIMITED"
+
+
+@pytest.mark.asyncio
+async def test_report_issue_different_types_allowed(client, test_work):
+    """Different issue types for the same work are allowed."""
+    resp1 = await client.post(
+        f"/api/v1/books/{test_work.id}/report",
+        json={
+            "issue_type": "wrong_cover",
+            "description": "The cover image is from a completely different book.",
+        },
+    )
+    assert resp1.status_code == 201
+
+    resp2 = await client.post(
+        f"/api/v1/books/{test_work.id}/report",
+        json={
+            "issue_type": "wrong_author",
+            "description": "The author listed here is not the actual author.",
+        },
+    )
+    assert resp2.status_code == 201
+
+    assert resp1.json()["id"] != resp2.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_report_issue_description_too_short(client, test_work):
+    """Description shorter than 10 characters is rejected by Pydantic validation."""
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/report",
+        json={
+            "issue_type": "wrong_cover",
+            "description": "Short",
+        },
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_report_issue_description_too_long(client, test_work):
+    """Description longer than 1000 characters is rejected by Pydantic validation."""
+    resp = await client.post(
+        f"/api/v1/books/{test_work.id}/report",
+        json={
+            "issue_type": "wrong_cover",
+            "description": "x" * 1001,
+        },
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_report_issue_all_valid_types(client, db_session, test_work):
+    """Each valid issue type can be submitted successfully."""
+    valid_types = [
+        "wrong_cover",
+        "wrong_author",
+        "wrong_title",
+        "wrong_description",
+        "duplicate",
+        "other",
+    ]
+    for issue_type in valid_types:
+        # Create a fresh work for each to avoid duplicate constraints
+        work = Work(
+            id=str(uuid.uuid4()),
+            title=f"Test Book for {issue_type}",
+            ratings_count=0,
+        )
+        db_session.add(work)
+        await db_session.commit()
+        await db_session.refresh(work)
+
+        resp = await client.post(
+            f"/api/v1/books/{work.id}/report",
+            json={
+                "issue_type": issue_type,
+                "description": f"Testing report submission for issue type: {issue_type}.",
+            },
+        )
+        assert resp.status_code == 201, f"Failed for issue_type={issue_type}: {resp.text}"
+        assert resp.json()["issue_type"] == issue_type
+```
+
+================================================================================
+FILE: ios/Shelf/Models/Report.swift
+================================================================================
+
+```swift
+import Foundation
+
+enum IssueType: String, Codable, CaseIterable {
+    case wrongCover = "wrong_cover"
+    case wrongAuthor = "wrong_author"
+    case wrongTitle = "wrong_title"
+    case wrongDescription = "wrong_description"
+    case duplicate = "duplicate"
+    case other = "other"
+
+    var displayName: String {
+        switch self {
+        case .wrongCover:
+            return "Wrong Cover"
+        case .wrongAuthor:
+            return "Wrong Author"
+        case .wrongTitle:
+            return "Wrong Title"
+        case .wrongDescription:
+            return "Wrong Description"
+        case .duplicate:
+            return "Duplicate Entry"
+        case .other:
+            return "Other"
+        }
+    }
+}
+
+struct ReportIssueRequest: Codable {
+    let issueType: IssueType
+    let description: String
+
+    enum CodingKeys: String, CodingKey {
+        case issueType = "issue_type"
+        case description
+    }
+}
+
+struct ReportIssueResponse: Codable, Identifiable {
+    let id: UUID
+    let issueType: IssueType
+    let status: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case issueType = "issue_type"
+        case status
+        case createdAt = "created_at"
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Services/ReportService.swift
+================================================================================
+
+```swift
+import Foundation
+
+@Observable
+final class ReportService {
+    static let shared = ReportService()
+
+    private init() {}
+
+    func reportIssue(
+        workID: UUID,
+        issueType: IssueType,
+        description: String
+    ) async throws -> ReportIssueResponse {
+        let body = ReportIssueRequest(
+            issueType: issueType,
+            description: description
+        )
+        let response: ReportIssueResponse = try await APIClient.shared.request(
+            method: .post,
+            path: "/books/\(workID.uuidString.lowercased())/report",
+            body: body
+        )
+        return response
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/BookDetail/ReportIssueSheet.swift
+================================================================================
+
+```swift
+import SwiftUI
+
+struct ReportIssueSheet: View {
+    let workID: UUID
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedIssueType: IssueType = .wrongCover
+    @State private var description: String = ""
+    @State private var isSubmitting: Bool = false
+    @State private var errorMessage: String?
+    @State private var showSuccessAlert: Bool = false
+
+    private var isFormValid: Bool {
+        description.trimmingCharacters(in: .whitespacesAndNewlines).count >= 10
+    }
+
+    private var characterCount: Int {
+        description.count
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Issue Type", selection: $selectedIssueType) {
+                        ForEach(IssueType.allCases, id: \.self) { issueType in
+                            Text(issueType.displayName).tag(issueType)
+                        }
+                    }
+                } header: {
+                    Text("What's wrong?")
+                }
+
+                Section {
+                    TextEditor(text: $description)
+                        .frame(minHeight: 120)
+
+                    HStack {
+                        if description.trimmingCharacters(in: .whitespacesAndNewlines).count < 10 && !description.isEmpty {
+                            Text("Minimum 10 characters required")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                        Spacer()
+                        Text("\(characterCount)/1000")
+                            .font(.caption)
+                            .foregroundStyle(characterCount > 1000 ? .red : .secondary)
+                    }
+                } header: {
+                    Text("Description")
+                } footer: {
+                    Text("Please describe the issue in detail so our team can review it.")
+                }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                Section {
+                    Button {
+                        Task {
+                            await submitReport()
+                        }
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if isSubmitting {
+                                ProgressView()
+                            } else {
+                                Text("Submit Report")
+                            }
+                            Spacer()
+                        }
+                    }
+                    .disabled(!isFormValid || isSubmitting || characterCount > 1000)
+                }
+            }
+            .navigationTitle("Report an Issue")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+            .alert("Report Submitted", isPresented: $showSuccessAlert) {
+                Button("OK") {
+                    dismiss()
+                }
+            } message: {
+                Text("Report submitted. Thank you!")
+            }
+        }
+    }
+
+    @MainActor
+    private func submitReport() async {
+        isSubmitting = true
+        errorMessage = nil
+
+        do {
+            let _ = try await ReportService.shared.reportIssue(
+                workID: workID,
+                issueType: selectedIssueType,
+                description: description.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            showSuccessAlert = true
+        } catch let error as APIError {
+            switch error.code {
+            case "DUPLICATE_REPORT":
+                errorMessage = "You already have an open report for this issue on this book."
+            case "REPORT_RATE_LIMITED":
+                errorMessage = "You've reached the daily report limit. Please try again tomorrow."
+            case "WORK_NOT_FOUND":
+                errorMessage = "This book could not be found."
+            default:
+                errorMessage = error.message
+            }
+        } catch {
+            errorMessage = "An unexpected error occurred. Please try again."
+        }
+
+        isSubmitting = false
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/BookDetail/BookDetailView.swift  (modifications)
+================================================================================
+
+Add a @State property for presenting the report sheet:
+
+```swift
+@State private var showReportSheet: Bool = false
+```
+
+Add a toolbar item to the existing NavigationStack/view in BookDetailView. Place
+this inside the `.toolbar { }` modifier (add one if not present):
+
+```swift
+.toolbar {
+    ToolbarItem(placement: .topBarTrailing) {
+        Menu {
+            Button(role: .destructive) {
+                showReportSheet = true
+            } label: {
+                Label("Report an Issue", systemImage: "exclamationmark.triangle")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+    }
+}
+.sheet(isPresented: $showReportSheet) {
+    ReportIssueSheet(workID: book.id)
+}
+```
+
+If BookDetailView already has a toolbar with other items, merge the Menu into the
+existing ToolbarItem or add a separate ToolbarItem. The key elements are:
+
+1. A three-dot menu (ellipsis.circle) in the top-right toolbar position
+2. A "Report an Issue" menu item with exclamationmark.triangle icon
+3. A .sheet modifier that presents ReportIssueSheet with the current work's ID
+
+Alternative placement (at the bottom of the scroll content instead of toolbar):
+
+```swift
+Section {
+    Button {
+        showReportSheet = true
+    } label: {
+        Label("Report an Issue", systemImage: "exclamationmark.triangle")
+            .foregroundStyle(.red)
+    }
+}
+```

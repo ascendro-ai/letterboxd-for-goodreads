@@ -1,0 +1,1337 @@
+================================================================================
+04 — Data Export
+JSON self-serve data export for GDPR compliance
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/export.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import datetime
+
+from sqlalchemy import ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+class ExportStatus(enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ExportRequest(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "export_requests"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[ExportStatus] = mapped_column(
+        default=ExportStatus.PENDING, server_default="PENDING"
+    )
+    file_url: Mapped[str | None] = mapped_column(Text)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    completed_at: Mapped[datetime | None] = mapped_column()
+    expires_at: Mapped[datetime | None] = mapped_column()
+
+    user = relationship("User", lazy="selectin")
+
+    __table_args__ = (
+        Index("ix_export_requests_user_status", "user_id", "status"),
+    )
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/models/__init__.py  (add import)
+────────────────────────────────────────────────────────────────────────────────
+
+Add this line alongside the existing model imports:
+
+from .export import ExportRequest, ExportStatus  # noqa: F401
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/migrations/versions/<next>_add_export_requests.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""add export_requests table
+
+Revision ID: b2c3d4e5f6a7
+Revises: 92903d6f6b99
+Create Date: 2026-03-02 16:30:00.000000
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'b2c3d4e5f6a7'
+down_revision: Union[str, None] = '92903d6f6b99'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.create_table('export_requests',
+        sa.Column('user_id', sa.Uuid(), nullable=False),
+        sa.Column('status', sa.Enum(
+            'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED',
+            name='exportstatus',
+        ), server_default='PENDING', nullable=False),
+        sa.Column('file_url', sa.Text(), nullable=True),
+        sa.Column('file_size_bytes', sa.Integer(), nullable=True),
+        sa.Column('completed_at', sa.DateTime(), nullable=True),
+        sa.Column('expires_at', sa.DateTime(), nullable=True),
+        sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+    )
+    op.create_index('ix_export_requests_user_id', 'export_requests', ['user_id'], unique=False)
+    op.create_index(
+        'ix_export_requests_user_status', 'export_requests', ['user_id', 'status'], unique=False
+    )
+
+
+def downgrade() -> None:
+    op.drop_index('ix_export_requests_user_status', table_name='export_requests')
+    op.drop_index('ix_export_requests_user_id', table_name='export_requests')
+    op.drop_table('export_requests')
+    sa.Enum('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', name='exportstatus').drop(op.get_bind())
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/schemas/export.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel
+
+__all__ = [
+    "ExportStatusResponse",
+    "ExportDownloadResponse",
+]
+
+
+class ExportStatusResponse(BaseModel):
+    id: UUID
+    status: str
+    file_url: str | None = None
+    file_size_bytes: int | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+    expires_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class ExportDownloadResponse(BaseModel):
+    download_url: str
+    expires_at: datetime
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/r2_storage.py  (R2 upload helper)
+────────────────────────────────────────────────────────────────────────────────
+
+"""
+Cloudflare R2 storage helpers.
+
+R2 is S3-compatible, so we use boto3 with a custom endpoint.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
+
+from backend.api.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+EXPORT_BUCKET = "shelf-exports"
+
+
+def _get_s3_client():
+    """Create an S3-compatible client configured for Cloudflare R2."""
+    settings = get_settings()
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.cloudflare_r2_endpoint,
+        aws_access_key_id=settings.cloudflare_r2_access_key,
+        aws_secret_access_key=settings.cloudflare_r2_secret_key,
+        config=Config(
+            signature_version="s3v4",
+            region_name="auto",
+        ),
+    )
+
+
+def upload_to_r2(data: bytes, key: str) -> str:
+    """Upload bytes to R2 and return the object key.
+
+    Args:
+        data: The file content as bytes.
+        key: The S3 object key (e.g. "exports/{user_id}/{export_id}.json").
+
+    Returns:
+        The object key that was uploaded.
+
+    Raises:
+        AppError: If the upload fails.
+    """
+    from backend.api.errors import AppError
+
+    try:
+        client = _get_s3_client()
+        client.put_object(
+            Bucket=EXPORT_BUCKET,
+            Key=key,
+            Body=data,
+            ContentType="application/json",
+        )
+        return key
+    except (BotoCoreError, ClientError) as e:
+        logger.error("R2 upload failed for key %s: %s", key, str(e))
+        raise AppError(
+            status_code=500,
+            code="UPLOAD_FAILED",
+            message="Failed to upload export file.",
+        ) from e
+
+
+def generate_signed_url(key: str, expires_in: int = 86400) -> str:
+    """Generate a pre-signed download URL for an R2 object.
+
+    Args:
+        key: The S3 object key.
+        expires_in: URL expiry in seconds. Defaults to 86400 (24 hours).
+
+    Returns:
+        A pre-signed URL string.
+    """
+    from backend.api.errors import AppError
+
+    try:
+        client = _get_s3_client()
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": EXPORT_BUCKET,
+                "Key": key,
+            },
+            ExpiresIn=expires_in,
+        )
+        return url
+    except (BotoCoreError, ClientError) as e:
+        logger.error("R2 signed URL generation failed for key %s: %s", key, str(e))
+        raise AppError(
+            status_code=500,
+            code="SIGNED_URL_FAILED",
+            message="Failed to generate download URL.",
+        ) from e
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/export_service.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""
+Data export service.
+
+Handles requesting, generating, and retrieving user data exports.
+Export files are JSON documents uploaded to R2 with signed download URLs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from uuid import UUID
+
+from backend.api.config import get_settings
+from backend.api.errors import AppError
+from backend.api.model_stubs import (
+    ExportRequest,
+    Follow,
+    Shelf,
+    ShelfBook,
+    User,
+    UserBook,
+    Work,
+)
+from backend.api.schemas.export import ExportStatusResponse
+from backend.services.r2_storage import generate_signed_url, upload_to_r2
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+logger = logging.getLogger(__name__)
+
+EXPORT_COOLDOWN_HOURS = 24
+SIGNED_URL_EXPIRY_SECONDS = 86400  # 24 hours
+
+
+async def request_export(db: AsyncSession, user_id: UUID) -> ExportStatusResponse:
+    """Request a new data export.
+
+    Rate-limited to 1 export per 24 hours. Kicks off a background task
+    to generate the export file.
+    """
+    # Check for existing pending/processing export in the last 24 hours
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=EXPORT_COOLDOWN_HOURS)
+    existing = await db.execute(
+        select(ExportRequest).where(
+            ExportRequest.user_id == user_id,
+            ExportRequest.status.in_(["pending", "processing"]),
+            ExportRequest.created_at >= cutoff,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise AppError(
+            status_code=429,
+            code="EXPORT_RATE_LIMITED",
+            message="An export is already in progress. Please wait 24 hours between export requests.",
+        )
+
+    # Also check for recently completed exports
+    recent_completed = await db.execute(
+        select(ExportRequest).where(
+            ExportRequest.user_id == user_id,
+            ExportRequest.status == "completed",
+            ExportRequest.created_at >= cutoff,
+        )
+    )
+    if recent_completed.scalar_one_or_none() is not None:
+        raise AppError(
+            status_code=429,
+            code="EXPORT_RATE_LIMITED",
+            message="You have already exported your data in the last 24 hours. Please try again later.",
+        )
+
+    # Create the export request
+    export_request = ExportRequest(
+        user_id=user_id,
+        status="pending",
+    )
+    db.add(export_request)
+    await db.flush()
+
+    # Kick off the background generation task
+    _task = asyncio.create_task(  # noqa: RUF006
+        generate_export(export_request.id, user_id)
+    )
+
+    return ExportStatusResponse(
+        id=export_request.id,
+        status="pending",
+        file_url=None,
+        file_size_bytes=None,
+        created_at=export_request.created_at,
+        completed_at=None,
+        expires_at=None,
+    )
+
+
+async def generate_export(export_request_id: UUID, user_id: UUID) -> None:
+    """Background task: generate the export JSON and upload to R2.
+
+    Runs in its own database session since it's a background task.
+    """
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with session_factory() as db:
+        try:
+            # Mark as processing
+            export_req = await _get_export_request(db, export_request_id)
+            export_req.status = "processing"
+            await db.commit()
+
+            # Load user
+            user_result = await db.execute(select(User).where(User.id == user_id))
+            user = user_result.scalar_one_or_none()
+            if user is None:
+                raise ValueError(f"User {user_id} not found")
+
+            # Load user_books with work details
+            user_books_result = await db.execute(
+                select(UserBook).where(UserBook.user_id == user_id)
+            )
+            user_books = list(user_books_result.scalars().all())
+
+            # Load works for those books
+            work_ids = [ub.work_id for ub in user_books]
+            works_map: dict[str, Work] = {}
+            if work_ids:
+                works_result = await db.execute(
+                    select(Work).where(Work.id.in_(work_ids))
+                )
+                works_map = {str(w.id): w for w in works_result.scalars().all()}
+
+            # Load shelves with their books
+            shelves_result = await db.execute(
+                select(Shelf).where(Shelf.user_id == user_id)
+            )
+            shelves = list(shelves_result.scalars().all())
+
+            # Load shelf_books for all shelves
+            shelf_ids = [s.id for s in shelves]
+            shelf_books_map: dict[str, list[str]] = {}
+            if shelf_ids:
+                shelf_books_result = await db.execute(
+                    select(ShelfBook).where(ShelfBook.shelf_id.in_(shelf_ids))
+                )
+                shelf_books = list(shelf_books_result.scalars().all())
+
+                # Build a map of shelf_id -> list of book titles
+                user_book_ids = [sb.user_book_id for sb in shelf_books]
+                ub_map: dict[str, UserBook] = {}
+                if user_book_ids:
+                    ub_result = await db.execute(
+                        select(UserBook).where(UserBook.id.in_(user_book_ids))
+                    )
+                    ub_map = {str(ub.id): ub for ub in ub_result.scalars().all()}
+
+                for sb in shelf_books:
+                    sid = str(sb.shelf_id)
+                    if sid not in shelf_books_map:
+                        shelf_books_map[sid] = []
+                    ub = ub_map.get(str(sb.user_book_id))
+                    if ub:
+                        work = works_map.get(str(ub.work_id))
+                        title = work.title if work else "Unknown"
+                        shelf_books_map[sid].append(title)
+
+            # Load following
+            following_result = await db.execute(
+                select(Follow).where(Follow.follower_id == user_id)
+            )
+            following_records = list(following_result.scalars().all())
+            following_user_ids = [f.following_id for f in following_records]
+
+            following_usernames: list[str] = []
+            if following_user_ids:
+                following_users_result = await db.execute(
+                    select(User).where(User.id.in_(following_user_ids))
+                )
+                following_usernames = [
+                    u.username for u in following_users_result.scalars().all()
+                ]
+
+            # Load followers
+            followers_result = await db.execute(
+                select(Follow).where(Follow.following_id == user_id)
+            )
+            follower_records = list(followers_result.scalars().all())
+            follower_user_ids = [f.follower_id for f in follower_records]
+
+            follower_usernames: list[str] = []
+            if follower_user_ids:
+                follower_users_result = await db.execute(
+                    select(User).where(User.id.in_(follower_user_ids))
+                )
+                follower_usernames = [
+                    u.username for u in follower_users_result.scalars().all()
+                ]
+
+            # Build the export JSON
+            now = datetime.now(timezone.utc)
+            export_data = {
+                "exported_at": now.isoformat(),
+                "user": {
+                    "username": user.username,
+                    "display_name": getattr(user, "display_name", None),
+                    "bio": getattr(user, "bio", None),
+                    "created_at": user.created_at.isoformat() if user.created_at else None,
+                },
+                "books": [
+                    _serialize_user_book(ub, works_map.get(str(ub.work_id)))
+                    for ub in user_books
+                ],
+                "shelves": [
+                    {
+                        "name": shelf.name,
+                        "description": getattr(shelf, "description", None),
+                        "is_public": getattr(shelf, "is_public", True),
+                        "books": shelf_books_map.get(str(shelf.id), []),
+                    }
+                    for shelf in shelves
+                ],
+                "following": following_usernames,
+                "followers": follower_usernames,
+            }
+
+            # Serialize to JSON bytes
+            json_bytes = json.dumps(export_data, indent=2, default=str).encode("utf-8")
+
+            # Upload to R2
+            r2_key = f"exports/{user_id}/{export_request_id}.json"
+            upload_to_r2(json_bytes, r2_key)
+
+            # Generate signed URL
+            signed_url = generate_signed_url(r2_key, SIGNED_URL_EXPIRY_SECONDS)
+            expires_at = now + timedelta(seconds=SIGNED_URL_EXPIRY_SECONDS)
+
+            # Update export request
+            export_req = await _get_export_request(db, export_request_id)
+            export_req.status = "completed"
+            export_req.file_url = signed_url
+            export_req.file_size_bytes = len(json_bytes)
+            export_req.completed_at = now
+            export_req.expires_at = expires_at
+            await db.commit()
+
+            logger.info(
+                "Export %s completed for user %s (%d bytes)",
+                export_request_id,
+                user_id,
+                len(json_bytes),
+            )
+
+        except Exception as e:
+            logger.error(
+                "Export %s failed for user %s: %s",
+                export_request_id,
+                user_id,
+                str(e),
+            )
+            try:
+                export_req = await _get_export_request(db, export_request_id)
+                export_req.status = "failed"
+                await db.commit()
+            except Exception:
+                logger.error("Failed to update export request status to failed")
+        finally:
+            await engine.dispose()
+
+
+async def get_export_status(db: AsyncSession, user_id: UUID) -> ExportStatusResponse:
+    """Return the most recent export request for the user."""
+    result = await db.execute(
+        select(ExportRequest)
+        .where(ExportRequest.user_id == user_id)
+        .order_by(ExportRequest.created_at.desc())
+        .limit(1)
+    )
+    export_req = result.scalar_one_or_none()
+    if export_req is None:
+        raise AppError(
+            status_code=404,
+            code="NO_EXPORT_FOUND",
+            message="No export request found.",
+        )
+
+    return ExportStatusResponse(
+        id=export_req.id,
+        status=export_req.status if isinstance(export_req.status, str) else export_req.status.value,
+        file_url=export_req.file_url,
+        file_size_bytes=export_req.file_size_bytes,
+        created_at=export_req.created_at,
+        completed_at=export_req.completed_at,
+        expires_at=export_req.expires_at,
+    )
+
+
+async def get_download_url(
+    db: AsyncSession, user_id: UUID, export_id: UUID
+) -> str:
+    """Get the download URL for a completed export.
+
+    Validates ownership and expiry. Regenerates the signed URL if the
+    export is still within the 24h window but the URL may have expired.
+    """
+    result = await db.execute(
+        select(ExportRequest).where(ExportRequest.id == export_id)
+    )
+    export_req = result.scalar_one_or_none()
+    if export_req is None:
+        raise AppError(
+            status_code=404,
+            code="EXPORT_NOT_FOUND",
+            message="No export found with the given ID.",
+        )
+
+    # Verify ownership
+    if str(export_req.user_id) != str(user_id):
+        raise AppError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="You do not have access to this export.",
+        )
+
+    # Verify status
+    status_val = export_req.status if isinstance(export_req.status, str) else export_req.status.value
+    if status_val != "completed":
+        raise AppError(
+            status_code=400,
+            code="EXPORT_NOT_READY",
+            message="This export is not yet completed.",
+        )
+
+    # Verify not expired
+    now = datetime.now(timezone.utc)
+    if export_req.expires_at and export_req.expires_at.replace(tzinfo=timezone.utc) < now:
+        raise AppError(
+            status_code=410,
+            code="EXPORT_EXPIRED",
+            message="This export has expired. Please request a new export.",
+        )
+
+    # Regenerate signed URL if needed (the original might be near expiry)
+    r2_key = f"exports/{user_id}/{export_id}.json"
+    new_url = generate_signed_url(r2_key, SIGNED_URL_EXPIRY_SECONDS)
+
+    # Update the stored URL
+    export_req.file_url = new_url
+    new_expires = now + timedelta(seconds=SIGNED_URL_EXPIRY_SECONDS)
+    export_req.expires_at = new_expires
+    await db.flush()
+
+    return new_url
+
+
+def _serialize_user_book(ub: UserBook, work: Work | None) -> dict:
+    """Serialize a user_book for the export JSON. No internal IDs exposed."""
+    authors_list: list[str] = []
+    if work and hasattr(work, "authors") and work.authors:
+        authors_list = [a.name for a in work.authors]
+
+    return {
+        "title": work.title if work else "Unknown",
+        "authors": authors_list,
+        "status": ub.status if isinstance(ub.status, str) else ub.status.value,
+        "rating": float(ub.rating) if ub.rating is not None else None,
+        "review_text": ub.review_text,
+        "has_spoilers": ub.has_spoilers,
+        "started_at": ub.started_at.isoformat() if ub.started_at else None,
+        "finished_at": ub.finished_at.isoformat() if ub.finished_at else None,
+        "created_at": ub.created_at.isoformat() if ub.created_at else None,
+    }
+
+
+async def _get_export_request(db: AsyncSession, export_id: UUID) -> ExportRequest:
+    """Load an export request by ID."""
+    result = await db.execute(
+        select(ExportRequest).where(ExportRequest.id == export_id)
+    )
+    return result.scalar_one()
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/export.py
+────────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from backend.api.deps import DB, CurrentUser
+from backend.api.schemas.export import ExportDownloadResponse, ExportStatusResponse
+from backend.services import export_service
+from fastapi import APIRouter, status
+
+router = APIRouter()
+
+
+@router.post(
+    "/me/export",
+    response_model=ExportStatusResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def request_export(
+    db: DB,
+    current_user: CurrentUser,
+) -> ExportStatusResponse:
+    """Request a data export. Rate limited to 1 per 24 hours."""
+    return await export_service.request_export(db, current_user.id)
+
+
+@router.get("/me/export/status", response_model=ExportStatusResponse)
+async def get_export_status(
+    db: DB,
+    current_user: CurrentUser,
+) -> ExportStatusResponse:
+    """Check the status of your most recent data export."""
+    return await export_service.get_export_status(db, current_user.id)
+
+
+@router.get("/me/export/{export_id}/download", response_model=ExportDownloadResponse)
+async def download_export(
+    export_id: UUID,
+    db: DB,
+    current_user: CurrentUser,
+) -> ExportDownloadResponse:
+    """Get a signed download URL for a completed export."""
+    from datetime import datetime, timedelta, timezone
+
+    download_url = await export_service.get_download_url(db, current_user.id, export_id)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=86400)
+    return ExportDownloadResponse(download_url=download_url, expires_at=expires_at)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/main.py  (register export router)
+────────────────────────────────────────────────────────────────────────────────
+
+Add to the router registration block in create_app():
+
+    from backend.api.routes import auth, books, export, feed, import_, shelves, user_books, users
+
+    # ... existing routers ...
+    app.include_router(export.router, prefix="/api/v1", tags=["export"])
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/model_stubs.py  (add ExportRequest stub)
+────────────────────────────────────────────────────────────────────────────────
+
+Add the following after the existing ImportJob class:
+
+class ExportRequest(TimestampMixin, Base):
+    __tablename__ = "export_requests"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/requirements.txt  (add boto3)
+────────────────────────────────────────────────────────────────────────────────
+
+Add the following line to the # Core section:
+
+boto3>=1.35.0
+
+
+Full updated requirements.txt:
+
+# Core
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.32.0
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+alembic>=1.13.0
+greenlet>=3.0.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+python-jose[cryptography]>=3.3.0
+httpx>=0.28.0
+python-multipart>=0.0.18
+python-dotenv>=1.0.0
+sentry-sdk[fastapi]>=2.19.0
+boto3>=1.35.0
+
+# Dev / Test
+ruff>=0.8.0
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+aiosqlite>=0.20.0
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_export.py
+────────────────────────────────────────────────────────────────────────────────
+
+import uuid
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_request_export_success(client):
+    """Request a data export — happy path."""
+    with patch(
+        "backend.services.export_service.asyncio.create_task"
+    ) as mock_task:
+        resp = await client.post("/api/v1/me/export")
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["status"] == "pending"
+    assert data["file_url"] is None
+    assert data["file_size_bytes"] is None
+    assert "id" in data
+    assert "created_at" in data
+
+
+@pytest.mark.asyncio
+async def test_request_export_rate_limited(client, db_session, test_user_id):
+    """Second export request within 24h returns 429."""
+    from backend.api.model_stubs import ExportRequest
+
+    # Create an existing recent export
+    export_req = ExportRequest(
+        id=str(uuid.uuid4()),
+        user_id=test_user_id,
+        status="completed",
+    )
+    db_session.add(export_req)
+    await db_session.commit()
+
+    resp = await client.post("/api/v1/me/export")
+    assert resp.status_code == 429
+    data = resp.json()
+    assert data["detail"]["error"]["code"] == "EXPORT_RATE_LIMITED"
+
+
+@pytest.mark.asyncio
+async def test_get_export_status(client, db_session, test_user_id):
+    """Check export status returns most recent export."""
+    from backend.api.model_stubs import ExportRequest
+
+    export_req = ExportRequest(
+        id=str(uuid.uuid4()),
+        user_id=test_user_id,
+        status="processing",
+    )
+    db_session.add(export_req)
+    await db_session.commit()
+    await db_session.refresh(export_req)
+
+    resp = await client.get("/api/v1/me/export/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "processing"
+    assert data["id"] == str(export_req.id)
+
+
+@pytest.mark.asyncio
+async def test_get_export_status_no_export(client):
+    """Export status with no exports returns 404."""
+    resp = await client.get("/api/v1/me/export/status")
+    assert resp.status_code == 404
+    data = resp.json()
+    assert data["detail"]["error"]["code"] == "NO_EXPORT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_download_export_success(client, db_session, test_user_id):
+    """Download a completed export — happy path."""
+    from backend.api.model_stubs import ExportRequest
+
+    expires = datetime.now(timezone.utc) + timedelta(hours=12)
+    export_req = ExportRequest(
+        id=str(uuid.uuid4()),
+        user_id=test_user_id,
+        status="completed",
+        file_url="https://r2.example.com/exports/test.json",
+        file_size_bytes=12345,
+        completed_at=datetime.now(timezone.utc),
+        expires_at=expires,
+    )
+    db_session.add(export_req)
+    await db_session.commit()
+    await db_session.refresh(export_req)
+
+    with patch(
+        "backend.services.export_service.generate_signed_url",
+        return_value="https://r2.example.com/exports/signed-url.json",
+    ):
+        resp = await client.get(f"/api/v1/me/export/{export_req.id}/download")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "download_url" in data
+    assert "expires_at" in data
+
+
+@pytest.mark.asyncio
+async def test_download_export_wrong_user(client, db_session):
+    """Downloading another user's export returns 403."""
+    from backend.api.model_stubs import ExportRequest
+
+    other_user_id = str(uuid.uuid4())
+    export_req = ExportRequest(
+        id=str(uuid.uuid4()),
+        user_id=other_user_id,
+        status="completed",
+        file_url="https://r2.example.com/exports/other.json",
+        file_size_bytes=5000,
+        completed_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=12),
+    )
+    db_session.add(export_req)
+    await db_session.commit()
+    await db_session.refresh(export_req)
+
+    resp = await client.get(f"/api/v1/me/export/{export_req.id}/download")
+    assert resp.status_code == 403
+    data = resp.json()
+    assert data["detail"]["error"]["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_download_export_expired(client, db_session, test_user_id):
+    """Downloading an expired export returns 410."""
+    from backend.api.model_stubs import ExportRequest
+
+    export_req = ExportRequest(
+        id=str(uuid.uuid4()),
+        user_id=test_user_id,
+        status="completed",
+        file_url="https://r2.example.com/exports/expired.json",
+        file_size_bytes=5000,
+        completed_at=datetime.now(timezone.utc) - timedelta(hours=48),
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=24),
+    )
+    db_session.add(export_req)
+    await db_session.commit()
+    await db_session.refresh(export_req)
+
+    resp = await client.get(f"/api/v1/me/export/{export_req.id}/download")
+    assert resp.status_code == 410
+    data = resp.json()
+    assert data["detail"]["error"]["code"] == "EXPORT_EXPIRED"
+
+
+@pytest.mark.asyncio
+async def test_download_export_not_found(client):
+    """Downloading a non-existent export returns 404."""
+    fake_id = str(uuid.uuid4())
+    resp = await client.get(f"/api/v1/me/export/{fake_id}/download")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_generate_export_builds_correct_json(db_session, test_user, test_work):
+    """Verify the export JSON structure is correct."""
+    from backend.api.model_stubs import ExportRequest, UserBook
+    from backend.services.export_service import _serialize_user_book
+
+    user_book = UserBook(
+        id=str(uuid.uuid4()),
+        user_id=test_user.id,
+        work_id=test_work.id,
+        status="read",
+        rating=4.5,
+        review_text="Wonderful book",
+        has_spoilers=False,
+        is_imported=False,
+    )
+    db_session.add(user_book)
+    await db_session.commit()
+    await db_session.refresh(user_book)
+
+    serialized = _serialize_user_book(user_book, test_work)
+    assert serialized["title"] == "Test Book"
+    assert serialized["status"] == "read"
+    assert serialized["rating"] == 4.5
+    assert serialized["review_text"] == "Wonderful book"
+    assert serialized["has_spoilers"] is False
+
+
+@pytest.mark.asyncio
+async def test_r2_upload_mock():
+    """Verify R2 upload is called correctly (mocked)."""
+    with patch("backend.services.r2_storage.boto3.client") as mock_boto:
+        mock_client = MagicMock()
+        mock_boto.return_value = mock_client
+
+        from backend.services.r2_storage import upload_to_r2
+
+        key = upload_to_r2(b'{"test": true}', "exports/test/test.json")
+
+        assert key == "exports/test/test.json"
+        mock_client.put_object.assert_called_once()
+        call_kwargs = mock_client.put_object.call_args[1]
+        assert call_kwargs["Key"] == "exports/test/test.json"
+        assert call_kwargs["ContentType"] == "application/json"
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Models/Export.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+enum ExportStatus: String, Codable {
+    case pending
+    case processing
+    case completed
+    case failed
+}
+
+struct ExportStatusResponse: Codable, Identifiable {
+    let id: UUID
+    let status: ExportStatus
+    let fileUrl: String?
+    let fileSizeBytes: Int?
+    let createdAt: Date
+    let completedAt: Date?
+    let expiresAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case status
+        case fileUrl = "file_url"
+        case fileSizeBytes = "file_size_bytes"
+        case createdAt = "created_at"
+        case completedAt = "completed_at"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct ExportDownloadResponse: Codable {
+    let downloadUrl: String
+    let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case downloadUrl = "download_url"
+        case expiresAt = "expires_at"
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/ExportService.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+@Observable
+final class ExportService {
+    static let shared = ExportService()
+    private init() {}
+
+    func requestExport() async throws -> ExportStatusResponse {
+        let response: ExportStatusResponse = try await APIClient.shared.request(
+            method: .post,
+            path: "/me/export"
+        )
+        return response
+    }
+
+    func getExportStatus() async throws -> ExportStatusResponse {
+        let response: ExportStatusResponse = try await APIClient.shared.request(
+            method: .get,
+            path: "/me/export/status"
+        )
+        return response
+    }
+
+    func getDownloadURL(exportID: UUID) async throws -> URL {
+        let response: ExportDownloadResponse = try await APIClient.shared.request(
+            method: .get,
+            path: "/me/export/\(exportID.uuidString)/download"
+        )
+        guard let url = URL(string: response.downloadUrl) else {
+            throw URLError(.badURL)
+        }
+        return url
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/ViewModels/ExportViewModel.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+
+@Observable
+final class ExportViewModel {
+    var status: ExportStatus?
+    var exportResponse: ExportStatusResponse?
+    var isLoading = false
+    var errorMessage: String?
+    var downloadURL: URL?
+
+    private var pollingTask: Task<Void, Never>?
+
+    @MainActor
+    func requestExport() async {
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let response = try await ExportService.shared.requestExport()
+            exportResponse = response
+            status = response.status
+            startPolling()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    @MainActor
+    func checkStatus() async {
+        do {
+            let response = try await ExportService.shared.getExportStatus()
+            exportResponse = response
+            status = response.status
+
+            if response.status == .completed || response.status == .failed {
+                stopPolling()
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            stopPolling()
+        }
+    }
+
+    @MainActor
+    func download() async {
+        guard let exportResponse, exportResponse.status == .completed else { return }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let url = try await ExportService.shared.getDownloadURL(exportID: exportResponse.id)
+            downloadURL = url
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    func startPolling() {
+        stopPolling()
+        pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { break }
+                await self?.checkStatus()
+
+                if let status = await self?.status,
+                   status == .completed || status == .failed {
+                    break
+                }
+            }
+        }
+    }
+
+    func stopPolling() {
+        pollingTask?.cancel()
+        pollingTask = nil
+    }
+
+    deinit {
+        pollingTask?.cancel()
+    }
+
+    /// Formatted file size string for display
+    var formattedFileSize: String? {
+        guard let bytes = exportResponse?.fileSizeBytes else { return nil }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(bytes))
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Profile/ExportDataView.swift
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+
+struct ExportDataView: View {
+    @State private var viewModel = ExportViewModel()
+
+    var body: some View {
+        List {
+            Section {
+                Text("Export a copy of all your Shelf data as a JSON file. This includes your books, reviews, ratings, shelves, and social connections.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                switch viewModel.status {
+                case .none:
+                    idleView
+                case .pending, .processing:
+                    processingView
+                case .completed:
+                    completedView
+                case .failed:
+                    failedView
+                }
+            }
+
+            if let errorMessage = viewModel.errorMessage {
+                Section {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .font(.subheadline)
+                }
+            }
+        }
+        .navigationTitle("Export Data")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await viewModel.checkStatus()
+        }
+    }
+
+    // MARK: - State Views
+
+    private var idleView: some View {
+        Button {
+            Task {
+                await viewModel.requestExport()
+            }
+        } label: {
+            HStack {
+                Label("Export My Data", systemImage: "square.and.arrow.up")
+                Spacer()
+                if viewModel.isLoading {
+                    ProgressView()
+                }
+            }
+        }
+        .disabled(viewModel.isLoading)
+    }
+
+    private var processingView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                ProgressView()
+                    .padding(.trailing, 8)
+                VStack(alignment: .leading) {
+                    Text("Preparing your export...")
+                        .font(.body)
+                    Text("This may take a minute.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var completedView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Export Ready", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.headline)
+
+            if let fileSize = viewModel.formattedFileSize {
+                Text("File size: \(fileSize)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let expiresAt = viewModel.exportResponse?.expiresAt {
+                Text("Expires: \(expiresAt.formatted(.relative(presentation: .named)))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                Task {
+                    await viewModel.download()
+                }
+            } label: {
+                HStack {
+                    Label("Download", systemImage: "arrow.down.circle")
+                    Spacer()
+                    if viewModel.isLoading {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(viewModel.isLoading)
+
+            Button {
+                Task {
+                    await viewModel.requestExport()
+                }
+            } label: {
+                Label("Request New Export", systemImage: "arrow.clockwise")
+            }
+        }
+        .padding(.vertical, 4)
+        .onChange(of: viewModel.downloadURL) { _, newURL in
+            if let url = newURL {
+                UIApplication.shared.open(url)
+            }
+        }
+    }
+
+    private var failedView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Export Failed", systemImage: "xmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.headline)
+
+            Text("Something went wrong while preparing your export. Please try again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Button {
+                Task {
+                    await viewModel.requestExport()
+                }
+            } label: {
+                HStack {
+                    Label("Try Again", systemImage: "arrow.clockwise")
+                    Spacer()
+                    if viewModel.isLoading {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(viewModel.isLoading)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+#Preview {
+    NavigationStack {
+        ExportDataView()
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Profile/SettingsView.swift  (add navigation link)
+────────────────────────────────────────────────────────────────────────────────
+
+Add the following NavigationLink inside the SettingsView body, in the
+appropriate section (e.g. "Account" or "Data"):
+
+Section("Data") {
+    NavigationLink {
+        ExportDataView()
+    } label: {
+        Label("Export My Data", systemImage: "square.and.arrow.up")
+    }
+}

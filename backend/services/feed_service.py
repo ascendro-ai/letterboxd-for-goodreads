@@ -135,6 +135,10 @@ async def _activities_to_feed(
         if not user or not user_book or not work:
             continue
 
+        # Skip private books from the feed
+        if getattr(user_book, "is_private", False):
+            continue
+
         items.append(
             FeedItem(
                 id=activity.id,

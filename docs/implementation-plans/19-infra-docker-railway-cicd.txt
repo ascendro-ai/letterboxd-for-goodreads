@@ -1,0 +1,494 @@
+================================================================================
+19 — Infrastructure: Docker, Railway Deployment & GitHub Actions CI/CD
+Complete deployment pipeline from local dev to production
+================================================================================
+
+This plan covers the three missing infrastructure pieces:
+  A) Dockerfiles for backend and pipeline
+  B) Railway deployment configuration
+  C) GitHub Actions CI/CD workflows
+
+================================================================================
+A. DOCKER
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/docker/Dockerfile.backend
+────────────────────────────────────────────────────────────────────────────────
+
+# Multi-stage build for small production image
+FROM python:3.12-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install system deps for asyncpg (libpq) and cryptography
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libpq-dev gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ .
+
+# Run Alembic migrations on startup, then launch uvicorn
+# The entrypoint script handles migration + startup sequencing
+COPY infra/docker/entrypoint-backend.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8000
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/docker/entrypoint-backend.sh
+────────────────────────────────────────────────────────────────────────────────
+
+#!/bin/bash
+set -e
+
+echo "Running Alembic migrations..."
+alembic upgrade head
+
+echo "Starting backend..."
+exec "$@"
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/docker/Dockerfile.pipeline
+────────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# psycopg needs libpq, Pillow needs libjpeg/libwebp for cover processing
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpq-dev gcc libjpeg62-turbo-dev libwebp-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY pipeline/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY pipeline/ .
+
+# No default CMD — Railway cron jobs specify the command per job
+# Examples:
+#   python -m sync.nightly_sync
+#   python -m sync.taste_match_job
+#   python -m cover_processing.fetch_covers
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/docker/docker-compose.yml
+────────────────────────────────────────────────────────────────────────────────
+
+# Local development compose — NOT for production (Railway handles prod)
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shelf
+      POSTGRES_USER: shelf
+      POSTGRES_PASSWORD: localdev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shelf"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shelf:localdev@db:5432/shelf
+      SUPABASE_JWT_SECRET: local-dev-secret-min-32-chars-long!!
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+
+  pipeline:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.pipeline
+    environment:
+      DATABASE_URL: postgresql+psycopg://shelf:localdev@db:5432/shelf
+    depends_on:
+      db:
+        condition: service_healthy
+    # Override command for local testing:
+    command: ["python", "-m", "sync.nightly_sync"]
+
+volumes:
+  pgdata:
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/docker/.dockerignore
+────────────────────────────────────────────────────────────────────────────────
+
+__pycache__
+*.pyc
+.venv
+.env
+.git
+*.egg-info
+.pytest_cache
+.ruff_cache
+node_modules
+ios/
+docs/
+*.md
+.DS_Store
+
+
+================================================================================
+B. RAILWAY DEPLOYMENT
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/railway/railway.toml
+────────────────────────────────────────────────────────────────────────────────
+
+# Railway project configuration
+# Docs: https://docs.railway.app/reference/config-as-code
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "infra/docker/Dockerfile.backend"
+watchPatterns = ["backend/**"]
+
+[deploy]
+startCommand = "uvicorn api.main:app --host 0.0.0.0 --port $PORT --workers 2"
+healthcheckPath = "/health"
+healthcheckTimeout = 10
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+[deploy.envs]
+ENVIRONMENT = "production"
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/railway/railway-pipeline.toml
+────────────────────────────────────────────────────────────────────────────────
+
+# Separate Railway service for pipeline cron jobs
+# Deploy as a separate service in the same Railway project
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "infra/docker/Dockerfile.pipeline"
+watchPatterns = ["pipeline/**"]
+
+[deploy]
+# No startCommand — cron triggers run specific commands
+restartPolicyType = "never"
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: infra/railway/cron-jobs.md
+────────────────────────────────────────────────────────────────────────────────
+
+# Railway Cron Job Configuration
+
+Configure these in Railway dashboard → Service → Settings → Cron:
+
+| Schedule        | Command                                      | Description              |
+|-----------------|----------------------------------------------|--------------------------|
+| 0 3 * * *       | python -m sync.nightly_sync                  | OL recent changes sync   |
+| 0 4 * * *       | python -m sync.taste_match_job               | Recompute taste scores   |
+| 0 5 * * *       | python -m cover_processing.fetch_covers      | Backfill missing covers  |
+
+All times are UTC. Nightly sync must run before taste match (taste match
+uses updated rating data from the sync).
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/health.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""Health check endpoint for Railway deployment monitoring."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+from sqlalchemy import text
+
+from backend.api.deps import DB
+
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+async def health_check(db: DB) -> dict[str, str]:
+    """Basic health check — verifies DB connectivity."""
+    await db.execute(text("SELECT 1"))
+    return {"status": "healthy"}
+
+
+Register in backend/api/main.py alongside other routers:
+
+    from backend.api.routes import health
+    app.include_router(health.router)
+
+
+================================================================================
+C. GITHUB ACTIONS CI/CD
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: .github/workflows/backend-ci.yml
+────────────────────────────────────────────────────────────────────────────────
+
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["backend/**"]
+  pull_request:
+    branches: [main]
+    paths: ["backend/**"]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check backend/
+      - run: ruff format --check backend/
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r backend/requirements.txt
+      - name: Run tests
+        working-directory: backend
+        run: pytest tests/ -v --tb=short --junitxml=test-results.xml
+        env:
+          DATABASE_URL: "sqlite+aiosqlite://"
+          SUPABASE_JWT_SECRET: "test-secret-key-minimum-32-characters!!"
+          ENVIRONMENT: test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: backend/test-results.xml
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: .github/workflows/pipeline-ci.yml
+────────────────────────────────────────────────────────────────────────────────
+
+name: Pipeline CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["pipeline/**"]
+  pull_request:
+    branches: [main]
+    paths: ["pipeline/**"]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check pipeline/
+      - run: ruff format --check pipeline/
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+      - run: pip install -r pipeline/requirements.txt
+      - name: Run tests
+        working-directory: pipeline
+        run: pytest tests/ -v --tb=short
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: .github/workflows/deploy.yml
+────────────────────────────────────────────────────────────────────────────────
+
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.modified, 'backend/')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Backend to Railway
+        uses: bervProject/railway-deploy@main
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+          service: shelf-backend
+
+  deploy-pipeline:
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.modified, 'pipeline/')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Pipeline to Railway
+        uses: bervProject/railway-deploy@main
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+          service: shelf-pipeline
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: .github/workflows/ios-ci.yml
+────────────────────────────────────────────────────────────────────────────────
+
+name: iOS CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**"]
+  pull_request:
+    branches: [main]
+    paths: ["ios/**"]
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+      - name: Build
+        working-directory: ios/Shelf
+        run: |
+          xcodebuild build-for-testing \
+            -project Shelf.xcodeproj \
+            -scheme Shelf \
+            -destination "platform=iOS Simulator,name=iPhone 15,OS=17.5" \
+            -quiet
+      - name: Test
+        working-directory: ios/Shelf
+        run: |
+          xcodebuild test \
+            -project Shelf.xcodeproj \
+            -scheme Shelf \
+            -destination "platform=iOS Simulator,name=iPhone 15,OS=17.5" \
+            -quiet \
+            -resultBundlePath TestResults.xcresult
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-test-results
+          path: ios/Shelf/TestResults.xcresult
+
+
+================================================================================
+GITHUB SECRETS REQUIRED
+================================================================================
+
+Configure these in GitHub repo → Settings → Secrets and variables → Actions:
+
+| Secret                  | Source                           |
+|-------------------------|----------------------------------|
+| RAILWAY_TOKEN           | Railway dashboard → Account → Tokens |
+
+Railway environment variables (DATABASE_URL, SUPABASE_*, etc.) are set
+directly in the Railway service dashboard, NOT in GitHub Secrets.
+
+
+================================================================================
+RAILWAY ENVIRONMENT VARIABLES
+================================================================================
+
+Set in Railway dashboard → Service → Variables:
+
+Backend service:
+  DATABASE_URL=postgresql+asyncpg://...  (auto-provisioned by Railway Postgres)
+  SUPABASE_URL=https://xxxx.supabase.co
+  SUPABASE_SERVICE_KEY=eyJ...
+  SUPABASE_JWT_SECRET=your-jwt-secret
+  SENTRY_DSN=https://xxxx@sentry.io/xxxx
+  POSTHOG_API_KEY=phc_xxxx
+  POSTHOG_HOST=https://us.i.posthog.com
+  CLOUDFLARE_R2_ENDPOINT=https://xxxx.r2.cloudflarestorage.com
+  CLOUDFLARE_R2_ACCESS_KEY=xxxx
+  CLOUDFLARE_R2_SECRET_KEY=xxxx
+  BOOKSHOP_AFFILIATE_ID=xxxx
+  OPENAI_API_KEY=sk-xxxx
+  APNS_KEY_ID=xxxx
+  APNS_TEAM_ID=xxxx
+  APNS_BUNDLE_ID=com.shelf.app
+  APNS_KEY_PATH=/app/secrets/AuthKey.p8
+  APNS_USE_SANDBOX=false
+  ENVIRONMENT=production
+
+Pipeline service:
+  DATABASE_URL=postgresql+psycopg://...  (same DB, sync driver)
+  CLOUDFLARE_R2_ENDPOINT=...
+  CLOUDFLARE_R2_ACCESS_KEY=...
+  CLOUDFLARE_R2_SECRET_KEY=...
+  CLOUDFLARE_R2_BUCKET=shelf-covers
+  CLOUDFLARE_CDN_BASE_URL=https://covers.shelf.app
+  GOOGLE_BOOKS_API_KEY=... (optional)
+
+
+================================================================================
+DEPLOYMENT CHECKLIST (first-time setup)
+================================================================================
+
+1. Create Railway project with two services: shelf-backend, shelf-pipeline
+2. Attach Railway Postgres plugin to both services
+3. Set all environment variables (see above)
+4. Upload APNs .p8 key file to backend service (Railway volume or build secret)
+5. Create GitHub repo secret: RAILWAY_TOKEN
+6. Push to main — CI runs tests, deploy workflow triggers Railway
+7. Verify health check: curl https://shelf-backend.up.railway.app/health
+8. Run initial migration: Railway CLI → railway run alembic upgrade head
+9. Run bulk import: Railway CLI → railway run python -m import_ol.bulk_import ...
+10. Enable cron jobs in Railway dashboard

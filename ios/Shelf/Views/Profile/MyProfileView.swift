@@ -3,15 +3,33 @@ import SwiftUI
 struct MyProfileView: View {
     @State private var viewModel = ProfileViewModel()
 
+    private let currentYear = Calendar.current.component(.year, from: Date())
+
     var body: some View {
         ProfileContentView(viewModel: viewModel)
             .navigationTitle("Profile")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        SettingsView()
-                    } label: {
-                        Image(systemName: "gearshape")
+                    HStack(spacing: 12) {
+                        NavigationLink {
+                            ReadingStatsView()
+                        } label: {
+                            Image(systemName: "chart.bar")
+                        }
+                        .accessibilityLabel("Reading Stats")
+
+                        NavigationLink {
+                            ReadingChallengeView()
+                        } label: {
+                            Image(systemName: "target")
+                        }
+                        .accessibilityLabel("\(String(currentYear)) Reading Challenge")
+
+                        NavigationLink {
+                            SettingsView()
+                        } label: {
+                            Image(systemName: "gearshape")
+                        }
                     }
                 }
             }

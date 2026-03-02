@@ -15,7 +15,7 @@ final class SubscriptionService {
     private(set) var activeSubscription: EntitlementInfo?
 
     static let entitlementID = "premium"
-    static let apiKey = "" // TODO: Set RevenueCat API key
+    static let apiKey = "test_kmxzPJfxgIAwTRKUZMrdQBvwtGk"
 
     private init() {}
 

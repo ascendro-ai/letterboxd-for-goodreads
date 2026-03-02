@@ -10,6 +10,7 @@ final class SyncService {
 
     private(set) var isOnline = true
     private(set) var isSyncing = false
+    private(set) var syncProgress: (completed: Int, total: Int) = (0, 0)
 
     private let monitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "com.shelf.network-monitor")
@@ -45,6 +46,7 @@ final class SyncService {
         isSyncing = true
 
         let actions = offlineStore.getPendingActions()
+        syncProgress = (0, actions.count)
         let decoder = JSONDecoder()
 
         for action in actions {
@@ -55,7 +57,6 @@ final class SyncService {
                         _ = try await userBookService.logBook(request)
                     }
                 case "update_book":
-                    // Payload contains both ID and request
                     if let wrapper = try? decoder.decode(UpdateActionPayload.self, from: action.payload) {
                         _ = try await userBookService.updateBook(id: wrapper.id, request: wrapper.request)
                     }
@@ -63,18 +64,43 @@ final class SyncService {
                     if let idWrapper = try? decoder.decode(IDWrapper.self, from: action.payload) {
                         try await userBookService.removeBook(id: idWrapper.id)
                     }
+                case "add_to_shelf":
+                    if let wrapper = try? decoder.decode(ShelfActionPayload.self, from: action.payload) {
+                        try await ShelfService.shared.addBookToShelf(
+                            shelfID: wrapper.shelfID,
+                            userBookID: wrapper.userBookID
+                        )
+                    }
+                case "remove_from_shelf":
+                    if let wrapper = try? decoder.decode(ShelfActionPayload.self, from: action.payload) {
+                        try await ShelfService.shared.removeBookFromShelf(
+                            shelfID: wrapper.shelfID,
+                            userBookID: wrapper.userBookID
+                        )
+                    }
                 default:
                     break
                 }
                 offlineStore.removePendingAction(action)
+            } catch let error as APIError {
+                // 409 Conflict: server has newer data — discard local change
+                if case .conflict = error {
+                    offlineStore.removePendingAction(action)
+                } else {
+                    action.retryCount += 1
+                    // Cap retries at 3 to avoid infinite loops on permanently-failing requests
+                    if action.retryCount > 3 {
+                        offlineStore.removePendingAction(action)
+                    }
+                }
             } catch {
-                // Increment retry count, skip if too many failures
                 action.retryCount += 1
-                // Cap retries at 3 to avoid infinite loops on permanently-failing requests (e.g., deleted resources).
                 if action.retryCount > 3 {
                     offlineStore.removePendingAction(action)
                 }
             }
+
+            syncProgress.completed += 1
         }
 
         isSyncing = false
@@ -90,4 +116,14 @@ struct UpdateActionPayload: Codable {
 
 struct IDWrapper: Codable {
     let id: UUID
+}
+
+struct ShelfActionPayload: Codable {
+    let shelfID: UUID
+    let userBookID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case shelfID = "shelf_id"
+        case userBookID = "user_book_id"
+    }
 }

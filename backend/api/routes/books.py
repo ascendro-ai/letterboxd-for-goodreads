@@ -7,9 +7,10 @@ from uuid import UUID
 from backend.api.deps import DB, CurrentUser
 from backend.api.schemas.books import BookDetail, BookSearchResult
 from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.content_tags import ContentTagResponse, VoteTagRequest
 from backend.api.schemas.report import ReportIssueRequest, ReportIssueResponse
 from backend.api.schemas.user_books import UserBookResponse
-from backend.services import book_service, report_service
+from backend.services import book_service, content_tag_service, report_service
 from fastapi import APIRouter, Query, status
 
 router = APIRouter()
@@ -106,3 +107,47 @@ async def report_metadata_issue(
         status=report.status,
         created_at=report.created_at,
     )
+
+
+@router.get("/tags/available")
+async def get_available_tags(
+    current_user: CurrentUser,
+) -> dict[str, list[str]]:
+    """Get all available content warning and mood tags."""
+    return await content_tag_service.get_available_tags()
+
+
+@router.get("/{work_id}/tags", response_model=list[ContentTagResponse])
+async def get_work_tags(
+    work_id: UUID,
+    db: DB,
+    current_user: CurrentUser,
+) -> list[ContentTagResponse]:
+    """Get content tags for a book."""
+    return await content_tag_service.get_work_tags(db, work_id)
+
+
+@router.post(
+    "/{work_id}/tags/vote",
+    response_model=ContentTagResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def vote_tag(
+    work_id: UUID,
+    request: VoteTagRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> ContentTagResponse:
+    """Vote for a content tag on a book."""
+    return await content_tag_service.vote_tag(db, current_user.id, work_id, request)
+
+
+@router.delete("/{work_id}/tags/{tag_name}/vote", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_tag_vote(
+    work_id: UUID,
+    tag_name: str,
+    db: DB,
+    current_user: CurrentUser,
+) -> None:
+    """Remove your vote from a content tag."""
+    await content_tag_service.remove_vote(db, current_user.id, work_id, tag_name)

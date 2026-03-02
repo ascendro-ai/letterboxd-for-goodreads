@@ -23,6 +23,7 @@ struct SpoilerText: View {
             .padding()
             .background(Color(.systemGray6))
             .clipShape(RoundedRectangle(cornerRadius: 10))
+            .accessibilityHint("Double tap to reveal spoiler content")
         } else {
             Text(text)
                 .font(.body)

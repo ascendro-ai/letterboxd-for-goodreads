@@ -1,0 +1,506 @@
+================================================================================
+20 — Third-Party Integration Setup Guide
+From placeholder API keys to real, working integrations
+================================================================================
+
+Current state: All third-party service code is written (services exist in both
+backend and iOS) but uses empty string placeholders for API keys. This plan
+covers what's needed to go from placeholders to working integrations for each
+service, including account setup, key provisioning, and code wiring.
+
+================================================================================
+1. SUPABASE AUTH (Apple, Google, Email Sign In)
+================================================================================
+
+Status: Backend JWT validation works. iOS AuthService scaffolded. Need real
+Supabase project + OAuth provider configuration.
+
+────────────────────────────────────────────────────────────────────────────────
+SETUP STEPS:
+────────────────────────────────────────────────────────────────────────────────
+
+a) Create Supabase project at https://supabase.com/dashboard
+   - Note: Project URL, anon key, service role key, JWT secret
+
+b) Enable auth providers in Supabase dashboard → Authentication → Providers:
+
+   APPLE SIGN IN:
+   - Register App ID at developer.apple.com → Certificates, Identifiers & Profiles
+   - Enable "Sign In with Apple" capability
+   - Create a Services ID for web (Supabase redirect URL)
+   - Generate a private key (.p8) for Sign In with Apple
+   - In Supabase: paste Client ID (Services ID), paste key, set team ID + key ID
+   - In Xcode: add "Sign in with Apple" capability to Shelf.entitlements
+
+   GOOGLE SIGN IN:
+   - Create project at console.cloud.google.com
+   - Enable Google Identity API
+   - Create OAuth 2.0 Client ID (iOS type) — needs bundle ID
+   - Create OAuth 2.0 Client ID (Web type) — for Supabase
+   - In Supabase: paste Web Client ID + Client Secret
+   - In Xcode: add reversed client ID to URL Schemes in Info.plist
+
+   EMAIL + PASSWORD:
+   - Enabled by default in Supabase
+   - Configure email templates in Supabase → Authentication → Email Templates
+   - Set up custom SMTP (optional) for branded emails
+
+c) Set environment variables:
+
+   Backend (.env):
+     SUPABASE_URL=https://xxxx.supabase.co
+     SUPABASE_SERVICE_KEY=eyJ...  (service role key, NOT anon key)
+     SUPABASE_JWT_SECRET=your-jwt-secret  (Settings → API → JWT Secret)
+
+   iOS (APIClient.swift or environment config):
+     Update AuthService.swift with:
+       - supabaseURL = "https://xxxx.supabase.co"
+       - supabaseAnonKey = "eyJ..." (anon key, safe for client)
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/AuthService.swift  (modifications)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace placeholder values:
+
+    // Before:
+    private let supabaseURL = ""
+    private let supabaseAnonKey = ""
+
+    // After — use build configuration or xcconfig:
+    private let supabaseURL = Bundle.main.infoDictionary?["SUPABASE_URL"] as? String ?? ""
+    private let supabaseAnonKey = Bundle.main.infoDictionary?["SUPABASE_ANON_KEY"] as? String ?? ""
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Resources/Config.xcconfig  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+// Debug configuration
+SUPABASE_URL = https:$()/$()/xxxx.supabase.co
+SUPABASE_ANON_KEY = eyJ...
+
+// Note: Use separate Debug.xcconfig and Release.xcconfig for different
+// environments. The $() trick escapes // in xcconfig files.
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Resources/Shelf-Info.plist  (additions)
+────────────────────────────────────────────────────────────────────────────────
+
+Add under the root <dict>:
+
+    <key>SUPABASE_URL</key>
+    <string>$(SUPABASE_URL)</string>
+    <key>SUPABASE_ANON_KEY</key>
+    <string>$(SUPABASE_ANON_KEY)</string>
+
+Also add for Google Sign In (URL scheme):
+
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>com.googleusercontent.apps.XXXX-XXXX</string>
+            </array>
+        </dict>
+    </array>
+
+
+================================================================================
+2. REVENUCAT + STOREKIT 2 (Premium Subscriptions)
+================================================================================
+
+Status: SubscriptionService.swift is fully implemented with RevenueCat SDK
+integration. Backend has premium gating logic. Need real RevenueCat account.
+
+────────────────────────────────────────────────────────────────────────────────
+SETUP STEPS:
+────────────────────────────────────────────────────────────────────────────────
+
+a) Create RevenueCat account at https://app.revenuecat.com
+
+b) App Store Connect setup:
+   - Create app in App Store Connect
+   - Create subscription group: "Shelf Premium"
+   - Create products:
+     - shelf_premium_monthly ($4.99/mo)
+     - shelf_premium_yearly ($39.99/yr — ~33% discount)
+   - Create Shared Secret (App Store Connect → App → App Information →
+     App-Specific Shared Secret)
+
+c) RevenueCat dashboard:
+   - Create new project
+   - Add iOS app (bundle ID: com.shelf.app)
+   - Paste App Store Connect Shared Secret
+   - Create entitlement: "premium"
+   - Create offering: "default"
+   - Attach both products to the "default" offering
+   - Copy Public SDK Key (starts with "appl_")
+
+d) Wire up the SDK key:
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/SubscriptionService.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+    // Before:
+    static let apiKey = ""
+
+    // After:
+    static let apiKey = "appl_xxxxxxxxxxxx"  // RevenueCat public SDK key
+
+────────────────────────────────────────────────────────────────────────────────
+
+e) Backend webhook (optional but recommended):
+   - In RevenueCat dashboard → Project → Integrations → Webhooks
+   - Set URL: https://shelf-backend.up.railway.app/api/v1/webhooks/revenuecat
+   - This enables server-side premium status sync
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/webhooks.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+"""Webhook receivers for third-party services."""
+
+from __future__ import annotations
+
+import hmac
+import hashlib
+import logging
+
+from fastapi import APIRouter, Header, HTTPException, Request
+
+from backend.api.deps import DB
+from backend.api.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+@router.post("/revenuecat")
+async def revenuecat_webhook(
+    request: Request,
+    db: DB,
+    authorization: str | None = Header(None),
+) -> dict[str, str]:
+    """Handle RevenueCat subscription events.
+
+    Events: INITIAL_PURCHASE, RENEWAL, CANCELLATION, EXPIRATION, etc.
+    Updates the user's is_premium flag in our database.
+    """
+    settings = get_settings()
+
+    # Verify webhook auth header
+    if settings.revenuecat_webhook_secret:
+        if authorization != f"Bearer {settings.revenuecat_webhook_secret}":
+            raise HTTPException(status_code=401, detail="Invalid webhook auth")
+
+    body = await request.json()
+    event_type = body.get("event", {}).get("type", "")
+    app_user_id = body.get("event", {}).get("app_user_id", "")
+
+    if not app_user_id:
+        return {"status": "ignored"}
+
+    # Update premium status based on event type
+    from sqlalchemy import update
+    from backend.api.model_stubs import User
+
+    grant_premium = event_type in (
+        "INITIAL_PURCHASE", "RENEWAL", "PRODUCT_CHANGE",
+        "UNCANCELLATION", "SUBSCRIBER_ALIAS",
+    )
+    revoke_premium = event_type in (
+        "EXPIRATION", "BILLING_ISSUE",
+    )
+
+    if grant_premium or revoke_premium:
+        await db.execute(
+            update(User)
+            .where(User.id == app_user_id)
+            .values(is_premium=grant_premium)
+        )
+        logger.info("RevenueCat %s for user %s → premium=%s",
+                     event_type, app_user_id, grant_premium)
+
+    return {"status": "ok"}
+
+
+Register in main.py:
+
+    from backend.api.routes import webhooks
+    app.include_router(webhooks.router, prefix="/api/v1")
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/config.py  (addition)
+────────────────────────────────────────────────────────────────────────────────
+
+Add to Settings class:
+
+    revenuecat_webhook_secret: str = ""
+
+
+================================================================================
+3. GOOGLE ADMOB (Ads)
+================================================================================
+
+Status: AdService.swift and NativeAdCardView.swift are scaffolded. Need real
+AdMob account and ad unit IDs.
+
+────────────────────────────────────────────────────────────────────────────────
+SETUP STEPS:
+────────────────────────────────────────────────────────────────────────────────
+
+a) Create AdMob account at https://admob.google.com
+
+b) Register iOS app in AdMob dashboard:
+   - Add app → iOS → bundle ID: com.shelf.app
+   - Note the App ID (ca-app-pub-XXXX~XXXX)
+
+c) Create ad units:
+   - Native Advanced ad unit (for feed integration)
+   - Note ad unit ID (ca-app-pub-XXXX/XXXX)
+
+d) Add AdMob App ID to Info.plist:
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Resources/Shelf-Info.plist  (addition)
+────────────────────────────────────────────────────────────────────────────────
+
+    <key>GADApplicationIdentifier</key>
+    <string>ca-app-pub-XXXXXXXXXXXX~XXXXXXXXXX</string>
+
+    <!-- Required for iOS 14+ ATT -->
+    <key>NSUserTrackingUsageDescription</key>
+    <string>This allows us to show you more relevant ads and keep Shelf free.</string>
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/AdService.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace placeholder ad unit IDs:
+
+    // Before:
+    private let nativeAdUnitID = ""
+
+    // After (use test IDs during development):
+    #if DEBUG
+    private let nativeAdUnitID = "ca-app-pub-3940256099942544/3986624511"  // Google test ad
+    #else
+    private let nativeAdUnitID = "ca-app-pub-XXXX/XXXX"  // Real production ad unit
+    #endif
+
+────────────────────────────────────────────────────────────────────────────────
+
+e) SPM dependency (already in project.yml):
+   - Google Mobile Ads SDK: https://github.com/googleads/swift-package-manager-google-mobile-ads
+
+f) Initialize in app startup:
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/App/ShelfApp.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Add to the init() or .onAppear of the root view:
+
+    import GoogleMobileAds
+
+    // In ShelfApp init:
+    GADMobileAds.sharedInstance().start(completionHandler: nil)
+
+    // For iOS 14+ ATT, request tracking permission before loading ads:
+    import AppTrackingTransparency
+
+    ATTrackingManager.requestTrackingAuthorization { status in
+        // Ads will load regardless, but targeting improves with permission
+    }
+
+
+================================================================================
+4. POSTHOG (Analytics)
+================================================================================
+
+Status: AnalyticsService.swift (iOS) and observability.py (backend) are
+implemented. Need real PostHog project.
+
+────────────────────────────────────────────────────────────────────────────────
+SETUP STEPS:
+────────────────────────────────────────────────────────────────────────────────
+
+a) Create PostHog account at https://posthog.com (free tier: 1M events/mo)
+
+b) Create project → copy API key and host URL
+
+c) Backend wiring:
+
+    Backend .env:
+      POSTHOG_API_KEY=phc_xxxx
+      POSTHOG_HOST=https://us.i.posthog.com
+
+    Already read by backend/api/config.py → used in services/observability.py
+
+d) iOS wiring:
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/AnalyticsService.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace placeholders:
+
+    // Before:
+    private let posthogAPIKey = ""
+    private let posthogHost = ""
+
+    // After:
+    private let posthogAPIKey = "phc_xxxx"
+    private let posthogHost = "https://us.i.posthog.com"
+
+────────────────────────────────────────────────────────────────────────────────
+
+e) SPM dependency:
+   - PostHog iOS: https://github.com/PostHog/posthog-ios
+
+f) Key events to track (already instrumented in AnalyticsService):
+   - book_logged, book_rated, review_submitted
+   - shelf_created, import_started, import_completed
+   - search_performed, barcode_scanned
+   - subscription_started, subscription_cancelled
+   - Sampling: 20% of events (configured in AnalyticsService)
+
+
+================================================================================
+5. SENTRY (Error Tracking + Performance)
+================================================================================
+
+Status: Backend middleware and iOS service both scaffolded. Need real DSNs.
+
+────────────────────────────────────────────────────────────────────────────────
+SETUP STEPS:
+────────────────────────────────────────────────────────────────────────────────
+
+a) Create Sentry account at https://sentry.io
+
+b) Create two projects:
+   - "shelf-backend" (Python, FastAPI)
+   - "shelf-ios" (Apple, iOS)
+
+c) Backend:
+
+    Backend .env:
+      SENTRY_DSN=https://xxxx@xxxx.ingest.sentry.io/xxxx
+
+    Already read by config.py → initialized in services/observability.py
+    Performance sampling: 10% (traces_sample_rate=0.1)
+
+d) iOS:
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/AnalyticsService.swift  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace Sentry placeholder:
+
+    // Before:
+    private let sentryDSN = ""
+
+    // After:
+    private let sentryDSN = "https://xxxx@xxxx.ingest.sentry.io/xxxx"
+
+────────────────────────────────────────────────────────────────────────────────
+
+e) SPM dependency:
+   - Sentry iOS: https://github.com/getsentry/sentry-cocoa
+
+f) Configure source maps / dSYM upload in Xcode build phases:
+   - Add "Sentry Debug Symbol Upload" run script phase
+   - SENTRY_AUTH_TOKEN and SENTRY_ORG set in Xcode environment
+
+
+================================================================================
+6. GOOGLE SIGN IN (iOS Native)
+================================================================================
+
+Status: AuthService references Google Sign In but needs real client ID.
+
+────────────────────────────────────────────────────────────────────────────────
+SETUP STEPS:
+────────────────────────────────────────────────────────────────────────────────
+
+a) In Google Cloud Console (same project as AdMob):
+   - APIs & Services → Credentials → Create OAuth Client ID
+   - Type: iOS
+   - Bundle ID: com.shelf.app
+   - Copy the iOS Client ID
+
+b) Supabase already handles the OAuth flow — the iOS app sends the Google
+   ID token to Supabase, which validates it. No direct Google Sign In SDK
+   needed if using Supabase Auth's built-in Google provider.
+
+   Alternative: Use Google Sign In SDK for native button + pass ID token
+   to Supabase.
+
+c) If using native Google Sign In SDK:
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/AuthService.swift  (modification for native Google)
+────────────────────────────────────────────────────────────────────────────────
+
+import GoogleSignIn
+
+func signInWithGoogle() async throws {
+    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+          let rootVC = windowScene.windows.first?.rootViewController else {
+        throw AuthError.noRootViewController
+    }
+
+    let result = try await GIDSignIn.sharedInstance.signIn(withPresenting: rootVC)
+    guard let idToken = result.user.idToken?.tokenString else {
+        throw AuthError.missingToken
+    }
+
+    // Pass Google ID token to Supabase for session creation
+    try await signInWithProvider(
+        provider: "google",
+        idToken: idToken,
+        accessToken: result.user.accessToken.tokenString
+    )
+}
+
+────────────────────────────────────────────────────────────────────────────────
+
+d) SPM dependency:
+   - Google Sign In: https://github.com/google/GoogleSignIn-iOS
+
+
+================================================================================
+SUMMARY: ENVIRONMENT VARIABLE CHECKLIST
+================================================================================
+
+Backend (.env):
+  ✅ DATABASE_URL                  — Supabase/Railway Postgres connection string
+  ✅ SUPABASE_URL                  — Supabase project URL
+  ✅ SUPABASE_SERVICE_KEY          — Supabase service role key
+  ✅ SUPABASE_JWT_SECRET           — JWT signing secret
+  ✅ SENTRY_DSN                    — Sentry project DSN
+  ✅ POSTHOG_API_KEY               — PostHog project API key
+  ✅ POSTHOG_HOST                  — PostHog ingestion host
+  ✅ CLOUDFLARE_R2_ENDPOINT        — R2 S3-compatible endpoint
+  ✅ CLOUDFLARE_R2_ACCESS_KEY      — R2 access key
+  ✅ CLOUDFLARE_R2_SECRET_KEY      — R2 secret key
+  ✅ BOOKSHOP_AFFILIATE_ID         — Bookshop.org affiliate ID
+  ✅ OPENAI_API_KEY                — OpenAI API key (for moderation)
+  ✅ APNS_KEY_ID                   — Apple Push Notification key ID
+  ✅ APNS_TEAM_ID                  — Apple Developer Team ID
+  ✅ APNS_KEY_PATH                 — Path to .p8 key file
+  ✅ REVENUECAT_WEBHOOK_SECRET     — RevenueCat webhook auth
+
+iOS (xcconfig / Info.plist / hardcoded):
+  ✅ SUPABASE_URL                  — xcconfig
+  ✅ SUPABASE_ANON_KEY             — xcconfig
+  ✅ RevenueCat SDK Key             — hardcoded in SubscriptionService
+  ✅ AdMob App ID                   — Info.plist GADApplicationIdentifier
+  ✅ AdMob Ad Unit ID               — hardcoded in AdService
+  ✅ PostHog API Key                — hardcoded in AnalyticsService
+  ✅ Sentry DSN                     — hardcoded in AnalyticsService
+  ✅ Google Sign In Client ID       — if using native SDK

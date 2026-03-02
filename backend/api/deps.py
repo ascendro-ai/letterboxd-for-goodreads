@@ -4,6 +4,7 @@ get_current_user_id() extracts the Supabase user UUID from the JWT.
 get_current_user() additionally loads the full User row (404 if not found).
 """
 
+import re
 from typing import Annotated
 from uuid import UUID
 
@@ -14,6 +15,10 @@ from fastapi import Depends, Header, HTTPException, status
 from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_DEV_TOKEN_RE = re.compile(
+    r"^dev-user-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 
 async def get_current_user_id(
@@ -26,6 +31,12 @@ async def get_current_user_id(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authorization header"
         )
     token = authorization.removeprefix("Bearer ")
+
+    # Dev auth bypass: accept "dev-user-<uuid>" tokens in development
+    if settings.dev_auth_bypass and settings.environment == "development":
+        if _DEV_TOKEN_RE.match(token):
+            return UUID(token.removeprefix("dev-user-"))
+
     try:
         payload = jwt.decode(
             token,

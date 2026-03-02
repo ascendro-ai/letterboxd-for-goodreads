@@ -1,0 +1,630 @@
+================================================================================
+11 — Google AdMob Native Ads Integration
+Native ads in the activity feed for free-tier users
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/AdService.swift  (COMPLETE REWRITE)
+────────────────────────────────────────────────────────────────────────────────
+
+import Foundation
+import GoogleMobileAds
+
+// MARK: - Ad Configuration
+
+enum AdConfig {
+    #if DEBUG
+    // Google test ad unit IDs — always return test ads
+    static let nativeAdUnitID = "ca-app-pub-3940256099942544/3986624511"
+    #else
+    static let nativeAdUnitID = "" // Set production ad unit ID from AdMob dashboard
+    #endif
+
+    static let minAdFrequency = 8
+    static let maxAdFrequency = 10
+    static let preloadCount = 3
+}
+
+// MARK: - Ad Service
+
+@Observable
+final class AdService: NSObject {
+    static let shared = AdService()
+
+    private let subscriptionService = SubscriptionService.shared
+
+    private var loadedAds: [GADNativeAd] = []
+    private var adLoader: GADAdLoader?
+    private var isLoadingAds = false
+    private var adInsertionIndices: Set<Int> = []
+    private var nextAdOffset: Int
+
+    var shouldShowAds: Bool {
+        subscriptionService.adsEnabled && !AdConfig.nativeAdUnitID.isEmpty
+    }
+
+    private override init() {
+        self.nextAdOffset = Int.random(in: AdConfig.minAdFrequency...AdConfig.maxAdFrequency)
+        super.init()
+    }
+
+    // MARK: - Configuration
+
+    func configure() {
+        guard shouldShowAds else { return }
+        GADMobileAds.sharedInstance().start { [weak self] status in
+            let adapters = status.adapterStatusesByClassName
+            for (adapter, info) in adapters {
+                if info.state == .ready {
+                    // Adapter initialized successfully
+                } else {
+                    AnalyticsService.captureMessage("AdMob adapter not ready: \(adapter)")
+                }
+            }
+            self?.preloadAds()
+        }
+    }
+
+    // MARK: - Ad Insertion Logic
+
+    /// Determines whether to insert an ad at the given feed index.
+    /// Uses randomized spacing (8-10 items) for a natural feel.
+    func shouldInsertAd(at index: Int) -> Bool {
+        guard shouldShowAds else { return false }
+        return adInsertionIndices.contains(index)
+    }
+
+    /// Call this when the feed item count changes to recalculate ad positions.
+    func calculateAdPositions(feedItemCount: Int) {
+        guard shouldShowAds else {
+            adInsertionIndices.removeAll()
+            return
+        }
+
+        adInsertionIndices.removeAll()
+        var position = nextAdOffset - 1 // zero-indexed
+        while position < feedItemCount {
+            adInsertionIndices.insert(position)
+            let spacing = Int.random(in: AdConfig.minAdFrequency...AdConfig.maxAdFrequency)
+            position += spacing
+        }
+    }
+
+    /// Returns a preloaded native ad and triggers loading the next one.
+    /// Returns nil if no ads are available (graceful degradation).
+    func getLoadedAd() -> GADNativeAd? {
+        guard !loadedAds.isEmpty else {
+            preloadAds()
+            return nil
+        }
+
+        let ad = loadedAds.removeFirst()
+
+        // Replenish the pool if running low
+        if loadedAds.count < 2 {
+            preloadAds()
+        }
+
+        return ad
+    }
+
+    // MARK: - Preloading
+
+    private func preloadAds() {
+        guard shouldShowAds else { return }
+        guard !isLoadingAds else { return }
+        guard loadedAds.count < AdConfig.preloadCount else { return }
+
+        isLoadingAds = true
+
+        let adsToLoad = AdConfig.preloadCount - loadedAds.count
+
+        let options = GADMultipleAdsAdLoaderOptions()
+        options.numberOfAds = adsToLoad
+
+        let adLoader = GADAdLoader(
+            adUnitID: AdConfig.nativeAdUnitID,
+            rootViewController: nil,
+            adTypes: [.native],
+            options: [options]
+        )
+        adLoader.delegate = self
+        self.adLoader = adLoader
+
+        adLoader.load(GADRequest())
+    }
+
+    // MARK: - Cleanup
+
+    func invalidateAds() {
+        loadedAds.removeAll()
+        adInsertionIndices.removeAll()
+        adLoader = nil
+    }
+}
+
+// MARK: - GADNativeAdLoaderDelegate
+
+extension AdService: GADNativeAdLoaderDelegate {
+    nonisolated func adLoader(_ adLoader: GADAdLoader, didReceive nativeAd: GADNativeAd) {
+        Task { @MainActor in
+            nativeAd.delegate = self
+            loadedAds.append(nativeAd)
+        }
+    }
+
+    nonisolated func adLoader(_ adLoader: GADAdLoader, didFailToReceiveAdWithError error: Error) {
+        Task { @MainActor in
+            isLoadingAds = false
+            // Fail silently — just don't show ads. Don't degrade user experience.
+            AnalyticsService.captureError(error, context: ["action": "ad_load_failed"])
+        }
+    }
+
+    nonisolated func adLoaderDidFinishLoading(_ adLoader: GADAdLoader) {
+        Task { @MainActor in
+            isLoadingAds = false
+        }
+    }
+}
+
+// MARK: - GADNativeAdDelegate
+
+extension AdService: GADNativeAdDelegate {
+    nonisolated func nativeAdDidRecordImpression(_ nativeAd: GADNativeAd) {
+        AnalyticsService.track(.adImpression)
+    }
+
+    nonisolated func nativeAdDidRecordClick(_ nativeAd: GADNativeAd) {
+        AnalyticsService.track(.adClick)
+    }
+
+    nonisolated func nativeAdWillPresentScreen(_ nativeAd: GADNativeAd) {
+        // Ad is about to present a full-screen overlay
+    }
+
+    nonisolated func nativeAdDidDismissScreen(_ nativeAd: GADNativeAd) {
+        // User dismissed the full-screen ad overlay
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Services/AnalyticsService.swift  (ADD EVENTS)
+────────────────────────────────────────────────────────────────────────────────
+
+Add these cases to the AnalyticsEvent enum:
+
+    // Ads
+    case adImpression = "ad_impression"
+    case adClick = "ad_click"
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Components/NativeAdCardView.swift  (COMPLETE REWRITE)
+────────────────────────────────────────────────────────────────────────────────
+
+import SwiftUI
+import GoogleMobileAds
+
+/// Native ad card styled to blend with FeedItemView cards in the activity feed.
+/// Wraps GADNativeAdView via UIViewRepresentable for full native ad rendering.
+struct NativeAdCardView: View {
+    @State private var nativeAd: GADNativeAd?
+    private let adService = AdService.shared
+
+    var body: some View {
+        Group {
+            if let nativeAd {
+                NativeAdRepresentable(nativeAd: nativeAd)
+                    .frame(minHeight: 120)
+            } else {
+                adPlaceholder
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 12)
+        .onAppear {
+            if nativeAd == nil {
+                nativeAd = adService.getLoadedAd()
+            }
+        }
+    }
+
+    /// Shimmer placeholder shown while the ad loads. Matches FeedItemView layout.
+    private var adPlaceholder: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Sponsored")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color(.systemGray5))
+                    .clipShape(Capsule())
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(.systemGray5))
+                    .frame(width: 60, height: 90)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(.systemGray5))
+                        .frame(height: 14)
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(.systemGray6))
+                        .frame(width: 120, height: 12)
+                    Spacer()
+                }
+            }
+            .frame(height: 90)
+            .redacted(reason: .placeholder)
+        }
+    }
+}
+
+// MARK: - UIViewRepresentable wrapper for GADNativeAdView
+
+struct NativeAdRepresentable: UIViewRepresentable {
+    let nativeAd: GADNativeAd
+
+    func makeUIView(context: Context) -> GADNativeAdView {
+        let nativeAdView = GADNativeAdView()
+        nativeAdView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Sponsored badge
+        let sponsoredLabel = UILabel()
+        sponsoredLabel.text = "Sponsored"
+        sponsoredLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        sponsoredLabel.textColor = .secondaryLabel
+        sponsoredLabel.backgroundColor = UIColor.systemGray5
+        sponsoredLabel.textAlignment = .center
+        sponsoredLabel.layer.cornerRadius = 8
+        sponsoredLabel.layer.masksToBounds = true
+        sponsoredLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        // Headline
+        let headlineLabel = UILabel()
+        headlineLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        headlineLabel.numberOfLines = 2
+        headlineLabel.translatesAutoresizingMaskIntoConstraints = false
+        nativeAdView.headlineView = headlineLabel
+
+        // Body text
+        let bodyLabel = UILabel()
+        bodyLabel.font = .systemFont(ofSize: 13)
+        bodyLabel.textColor = .secondaryLabel
+        bodyLabel.numberOfLines = 3
+        bodyLabel.translatesAutoresizingMaskIntoConstraints = false
+        nativeAdView.bodyView = bodyLabel
+
+        // Media view (image/video from ad)
+        let mediaView = GADMediaView()
+        mediaView.contentMode = .scaleAspectFill
+        mediaView.layer.cornerRadius = 6
+        mediaView.layer.masksToBounds = true
+        mediaView.translatesAutoresizingMaskIntoConstraints = false
+        nativeAdView.mediaView = mediaView
+
+        // Call to action button
+        let ctaButton = UIButton(type: .system)
+        ctaButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        ctaButton.setTitleColor(.white, for: .normal)
+        ctaButton.backgroundColor = UIColor.tintColor
+        ctaButton.layer.cornerRadius = 8
+        ctaButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+        ctaButton.translatesAutoresizingMaskIntoConstraints = false
+        ctaButton.isUserInteractionEnabled = false // GADNativeAdView handles taps
+        nativeAdView.callToActionView = ctaButton
+
+        // Icon view
+        let iconView = UIImageView()
+        iconView.contentMode = .scaleAspectFit
+        iconView.layer.cornerRadius = 4
+        iconView.layer.masksToBounds = true
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        nativeAdView.iconView = iconView
+
+        // Layout
+        let textStack = UIStackView(arrangedSubviews: [headlineLabel, bodyLabel])
+        textStack.axis = .vertical
+        textStack.spacing = 4
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let contentStack = UIStackView(arrangedSubviews: [iconView, textStack])
+        contentStack.axis = .horizontal
+        contentStack.spacing = 12
+        contentStack.alignment = .top
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+
+        nativeAdView.addSubview(sponsoredLabel)
+        nativeAdView.addSubview(contentStack)
+        nativeAdView.addSubview(mediaView)
+        nativeAdView.addSubview(ctaButton)
+
+        NSLayoutConstraint.activate([
+            // Sponsored label — top left
+            sponsoredLabel.topAnchor.constraint(equalTo: nativeAdView.topAnchor),
+            sponsoredLabel.leadingAnchor.constraint(equalTo: nativeAdView.leadingAnchor),
+            sponsoredLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 70),
+            sponsoredLabel.heightAnchor.constraint(equalToConstant: 18),
+
+            // Icon
+            iconView.widthAnchor.constraint(equalToConstant: 40),
+            iconView.heightAnchor.constraint(equalToConstant: 40),
+
+            // Content stack — below sponsored label
+            contentStack.topAnchor.constraint(equalTo: sponsoredLabel.bottomAnchor, constant: 8),
+            contentStack.leadingAnchor.constraint(equalTo: nativeAdView.leadingAnchor),
+            contentStack.trailingAnchor.constraint(equalTo: nativeAdView.trailingAnchor),
+
+            // Media view — below content, conditionally shown
+            mediaView.topAnchor.constraint(equalTo: contentStack.bottomAnchor, constant: 8),
+            mediaView.leadingAnchor.constraint(equalTo: nativeAdView.leadingAnchor),
+            mediaView.trailingAnchor.constraint(equalTo: nativeAdView.trailingAnchor),
+            mediaView.heightAnchor.constraint(equalToConstant: 0), // Will be updated
+
+            // CTA button — bottom right
+            ctaButton.topAnchor.constraint(equalTo: mediaView.bottomAnchor, constant: 8),
+            ctaButton.trailingAnchor.constraint(equalTo: nativeAdView.trailingAnchor),
+            ctaButton.bottomAnchor.constraint(equalTo: nativeAdView.bottomAnchor),
+        ])
+
+        // Store media height constraint reference for updating
+        context.coordinator.mediaHeightConstraint = mediaView.constraints.first(where: {
+            $0.firstAttribute == .height
+        })
+
+        return nativeAdView
+    }
+
+    func updateUIView(_ nativeAdView: GADNativeAdView, context: Context) {
+        nativeAdView.nativeAd = nativeAd
+
+        // Populate headline
+        (nativeAdView.headlineView as? UILabel)?.text = nativeAd.headline
+
+        // Populate body
+        (nativeAdView.bodyView as? UILabel)?.text = nativeAd.body
+        nativeAdView.bodyView?.isHidden = nativeAd.body == nil
+
+        // Populate icon
+        (nativeAdView.iconView as? UIImageView)?.image = nativeAd.icon?.image
+        nativeAdView.iconView?.isHidden = nativeAd.icon == nil
+
+        // Populate media
+        if nativeAd.mediaContent.hasVideoContent || nativeAd.mediaContent.aspectRatio > 0 {
+            (nativeAdView.mediaView)?.mediaContent = nativeAd.mediaContent
+            context.coordinator.mediaHeightConstraint?.constant = 150
+            nativeAdView.mediaView?.isHidden = false
+        } else {
+            context.coordinator.mediaHeightConstraint?.constant = 0
+            nativeAdView.mediaView?.isHidden = true
+        }
+
+        // Populate CTA
+        (nativeAdView.callToActionView as? UIButton)?.setTitle(
+            nativeAd.callToAction, for: .normal
+        )
+        nativeAdView.callToActionView?.isHidden = nativeAd.callToAction == nil
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    class Coordinator {
+        var mediaHeightConstraint: NSLayoutConstraint?
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/Views/Feed/FeedView.swift  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+Replace the existing feedList computed property to use the improved ad
+integration with calculated positions:
+
+    private var feedList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { index, item in
+                    NavigationLink(value: item.book) {
+                        FeedItemView(item: item)
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider()
+                        .padding(.horizontal)
+
+                    // Insert native ad card at calculated positions
+                    if adService.shouldInsertAd(at: index) {
+                        NativeAdCardView()
+                        Divider()
+                            .padding(.horizontal)
+                    }
+
+                    // Load more when nearing end
+                    if index == viewModel.items.count - 3 {
+                        Color.clear
+                            .frame(height: 1)
+                            .task {
+                                await viewModel.loadMore()
+                            }
+                    }
+                }
+
+                if viewModel.isLoadingMore {
+                    ProgressView()
+                        .padding()
+                }
+            }
+        }
+        .navigationDestination(for: Book.self) { book in
+            BookDetailView(bookID: book.id)
+        }
+        .onChange(of: viewModel.items.count) { _, newCount in
+            adService.calculateAdPositions(feedItemCount: newCount)
+        }
+    }
+
+The .onChange modifier recalculates ad positions whenever the feed grows
+(initial load, pagination, refresh). This ensures ads are always properly
+spaced at the randomized 8-10 item intervals.
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/App/ShelfApp.swift  (MODIFICATIONS)
+────────────────────────────────────────────────────────────────────────────────
+
+In the existing init() method, add AdService configuration after the
+existing SubscriptionService.shared.configure() call:
+
+    init() {
+        // Initialize SDKs
+        AnalyticsService.configure()
+        SubscriptionService.shared.configure()
+        AdService.shared.configure()
+    }
+
+The AdService.configure() call is safe to make unconditionally — it
+internally checks shouldShowAds (which checks isPremium and whether an
+ad unit ID is set) before initializing the Google Mobile Ads SDK.
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/App/Info.plist  (ADD ADMOB CONFIGURATION)
+────────────────────────────────────────────────────────────────────────────────
+
+Add these keys to the Info.plist (or via Xcode target settings):
+
+    <key>GADApplicationIdentifier</key>
+    <string>ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY</string>
+
+    <key>SKAdNetworkItems</key>
+    <array>
+        <!-- Google -->
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>cstr6suwn9.skadnetwork</string>
+        </dict>
+        <!-- Meta / Facebook -->
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>v9wttpbfk9.skadnetwork</string>
+        </dict>
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>n38lu8286q.skadnetwork</string>
+        </dict>
+        <!-- Unity Ads -->
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>4dzt52r2t5.skadnetwork</string>
+        </dict>
+        <!-- AdColony -->
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>4pfyvq9l8r.skadnetwork</string>
+        </dict>
+        <!-- AppLovin -->
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>ludvb6z3bs.skadnetwork</string>
+        </dict>
+        <!-- Vungle -->
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>gta9lk7p23.skadnetwork</string>
+        </dict>
+        <!-- IronSource -->
+        <dict>
+            <key>SKAdNetworkIdentifier</key>
+            <string>su67r6k2v3.skadnetwork</string>
+        </dict>
+    </array>
+
+Replace ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY with the actual AdMob
+App ID from the AdMob dashboard (Apps > App settings > App ID).
+
+Note: The SKAdNetworkIdentifier list above is a minimal subset. Google
+publishes a full list at:
+https://developers.google.com/admob/ios/3p-skadnetworks
+
+For a complete integration, download their full list and include all entries.
+
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: ios/Shelf/App/AppDelegate.swift or ShelfApp.swift  (ATT PROMPT)
+────────────────────────────────────────────────────────────────────────────────
+
+For iOS 14.5+, App Tracking Transparency is required for personalized ads.
+Add to Info.plist:
+
+    <key>NSUserTrackingUsageDescription</key>
+    <string>This allows Shelf to show you more relevant ads. Your data is never sold.</string>
+
+Add the ATT request in the AppDelegate didFinishLaunching or in the .task
+block of ShelfApp, AFTER a short delay so it doesn't appear at first launch:
+
+import AppTrackingTransparency
+
+// In ShelfApp .task block, after auth restoration:
+if !subscriptionService.isPremium {
+    // Delay ATT prompt slightly so it doesn't appear immediately
+    try? await Task.sleep(for: .seconds(2))
+    if #available(iOS 14.5, *) {
+        await ATTrackingManager.requestTrackingAuthorization()
+    }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+PACKAGE DEPENDENCY: Google Mobile Ads SDK via SPM
+────────────────────────────────────────────────────────────────────────────────
+
+In Xcode:
+1. File > Add Package Dependencies...
+2. Enter URL: https://github.com/googleads/swift-package-manager-google-mobile-ads
+3. Set version rule: Up to Next Major Version, from 12.0.0
+4. Add the GoogleMobileAds library to the Shelf target
+
+In Package.swift (if using one):
+
+    dependencies: [
+        .package(
+            url: "https://github.com/googleads/swift-package-manager-google-mobile-ads",
+            from: "12.0.0"
+        ),
+    ]
+
+    targets: [
+        .target(
+            name: "Shelf",
+            dependencies: [
+                .product(name: "GoogleMobileAds", package: "swift-package-manager-google-mobile-ads"),
+            ]
+        ),
+    ]
+
+
+────────────────────────────────────────────────────────────────────────────────
+INTEGRATION CHECKLIST
+────────────────────────────────────────────────────────────────────────────────
+
+1. Add GoogleMobileAds SPM dependency (12.0.0+)
+2. Set GADApplicationIdentifier in Info.plist
+3. Add SKAdNetworkItems to Info.plist (use Google's full list)
+4. Add NSUserTrackingUsageDescription to Info.plist
+5. Replace AdService.swift with the full implementation above
+6. Replace NativeAdCardView.swift with the GADNativeAdView wrapper above
+7. Update FeedView.swift with the .onChange ad position calculation
+8. Add AdService.shared.configure() to ShelfApp.init()
+9. Add ad analytics events to AnalyticsEvent enum
+10. Test with Google test ad unit IDs in DEBUG builds
+11. Before App Store submission: replace test IDs with production ad unit IDs
+12. Before App Store submission: replace GADApplicationIdentifier placeholder

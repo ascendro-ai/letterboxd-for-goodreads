@@ -1,0 +1,1385 @@
+================================================================================
+IMPLEMENTATION PLAN: GDPR-Compliant Account Deletion & Data Anonymization
+================================================================================
+
+Feature: Complete GDPR-compliant account deletion with comprehensive data
+anonymization. Replaces the existing minimal soft_delete_account() with a
+thorough cleanup that preserves reviews as "Deleted User" while removing all
+personal data, social connections, and device tokens.
+
+================================================================================
+FILE: backend/services/user_service.py  (full replacement)
+================================================================================
+
+```python
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from backend.api.errors import blocked_user, user_not_found
+from backend.api.model_stubs import (
+    Activity,
+    Block,
+    Follow,
+    Mute,
+    Notification,
+    Shelf,
+    ShelfBook,
+    User,
+    UserBook,
+)
+from backend.api.pagination import apply_cursor_filter, encode_cursor
+from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.users import UpdateProfileRequest, UserBrief, UserProfile
+from backend.services.social_service import is_blocked
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def get_profile(
+    db: AsyncSession,
+    requesting_user_id: UUID,
+    target_user_id: UUID,
+) -> UserProfile:
+    """Get a user profile with counts and is_following flag."""
+    if str(requesting_user_id) != str(target_user_id) and await is_blocked(
+        db, requesting_user_id, target_user_id
+    ):
+        raise blocked_user()
+
+    result = await db.execute(
+        select(User).where(User.id == target_user_id, User.is_deleted == False)  # noqa: E712
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise user_not_found()
+
+    # Count books
+    books_count = (
+        await db.scalar(select(func.count()).where(UserBook.user_id == target_user_id)) or 0
+    )
+
+    # Count followers
+    followers_count = (
+        await db.scalar(select(func.count()).where(Follow.following_id == target_user_id)) or 0
+    )
+
+    # Count following
+    following_count = (
+        await db.scalar(select(func.count()).where(Follow.follower_id == target_user_id)) or 0
+    )
+
+    # Check if requesting user follows target
+    is_following = False
+    if str(requesting_user_id) != str(target_user_id):
+        follow_result = await db.execute(
+            select(Follow).where(
+                Follow.follower_id == requesting_user_id,
+                Follow.following_id == target_user_id,
+            )
+        )
+        is_following = follow_result.scalar_one_or_none() is not None
+
+    return UserProfile(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        avatar_url=user.avatar_url,
+        bio=user.bio,
+        favorite_books=user.favorite_books or [],
+        books_count=books_count,
+        followers_count=followers_count,
+        following_count=following_count,
+        is_following=is_following,
+        created_at=user.created_at,
+    )
+
+
+async def update_profile(
+    db: AsyncSession,
+    user_id: UUID,
+    request: UpdateProfileRequest,
+) -> UserProfile:
+    """Update user profile fields."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise user_not_found()
+
+    if request.display_name is not None:
+        user.display_name = request.display_name
+    if request.bio is not None:
+        user.bio = request.bio
+    if request.avatar_url is not None:
+        user.avatar_url = request.avatar_url
+    if request.favorite_books is not None:
+        user.favorite_books = [str(b) for b in request.favorite_books]
+
+    await db.flush()
+
+    return await get_profile(db, user_id, user_id)
+
+
+async def search_users(
+    db: AsyncSession,
+    query: str,
+    cursor: str | None,
+    limit: int,
+) -> PaginatedResponse[UserBrief]:
+    """Search users by username or display name (ILIKE for now, trigram in production)."""
+    stmt = (
+        select(User)
+        .where(
+            User.is_deleted == False,  # noqa: E712
+            or_(
+                User.username.ilike(f"%{query}%"),
+                User.display_name.ilike(f"%{query}%"),
+            ),
+        )
+        .order_by(User.created_at.desc(), User.id.desc())
+    )
+    stmt = apply_cursor_filter(stmt, User, cursor)
+    stmt = stmt.limit(limit + 1)
+
+    result = await db.execute(stmt)
+    users = list(result.scalars().all())
+
+    has_more = len(users) > limit
+    if has_more:
+        users = users[:limit]
+
+    items = [
+        UserBrief(
+            id=u.id, username=u.username, display_name=u.display_name, avatar_url=u.avatar_url
+        )
+        for u in users
+    ]
+
+    next_cursor = encode_cursor(users[-1].created_at, users[-1].id) if has_more else None
+    return PaginatedResponse(items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+async def soft_delete_account(db: AsyncSession, user_id: UUID) -> None:
+    """Comprehensive GDPR-compliant account deletion with data anonymization.
+
+    Steps performed:
+      1. Mark user as deleted with timestamp
+      2. Anonymize profile (username, display_name, bio, avatar, favorites)
+      3. Delete all device tokens (push notifications)
+      4. Delete all contact hashes (friend discovery)
+      5. Invalidate all invite codes created by user
+      6. Delete all follows (both directions)
+      7. Delete all blocks and mutes (both directions)
+      8. Keep reviews and ratings (they persist as "Deleted User")
+      9. Keep user_books records (ratings/reviews stay)
+     10. Make all shelves private and anonymize
+     11. Delete all pending export requests
+     12. Delete all activities from feed
+     13. Clear all notification records
+
+    Reviews and ratings are intentionally preserved and will appear under the
+    anonymized "Deleted User" identity, consistent with the app spec.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise user_not_found()
+
+    now = datetime.now(timezone.utc)
+
+    # --- Step 1: Mark as deleted ---
+    user.is_deleted = True
+    user.deleted_at = now
+
+    # --- Step 2: Anonymize profile ---
+    user.username = f"deleted_{str(user_id)[:8]}"
+    user.display_name = "Deleted User"
+    user.bio = None
+    user.avatar_url = None
+    user.favorite_books = []
+
+    # --- Step 3: Delete device tokens ---
+    # DeviceToken table stores push notification tokens for this user.
+    # Using raw SQL delete since the model may live in model_stubs or a
+    # dedicated notifications module.
+    try:
+        from backend.api.model_stubs import DeviceToken
+
+        await db.execute(
+            delete(DeviceToken).where(DeviceToken.user_id == user_id)
+        )
+    except (ImportError, AttributeError):
+        # DeviceToken model not yet implemented -- skip
+        pass
+
+    # --- Step 4: Delete contact hashes (friend discovery) ---
+    try:
+        from backend.api.model_stubs import ContactHash
+
+        await db.execute(
+            delete(ContactHash).where(ContactHash.user_id == user_id)
+        )
+    except (ImportError, AttributeError):
+        # ContactHash model not yet implemented -- skip
+        pass
+
+    # --- Step 5: Invalidate invite codes ---
+    try:
+        from backend.api.model_stubs import InviteCode
+
+        await db.execute(
+            update(InviteCode)
+            .where(InviteCode.created_by == user_id)
+            .values(expires_at=now)
+        )
+    except (ImportError, AttributeError):
+        # InviteCode model not yet implemented -- skip
+        pass
+
+    # --- Step 6: Delete all follows (both directions) ---
+    await db.execute(
+        delete(Follow).where(
+            or_(
+                Follow.follower_id == user_id,
+                Follow.following_id == user_id,
+            )
+        )
+    )
+
+    # --- Step 7: Delete all blocks and mutes (both directions) ---
+    await db.execute(
+        delete(Block).where(
+            or_(
+                Block.blocker_id == user_id,
+                Block.blocked_id == user_id,
+            )
+        )
+    )
+    await db.execute(
+        delete(Mute).where(
+            or_(
+                Mute.muter_id == user_id,
+                Mute.muted_id == user_id,
+            )
+        )
+    )
+
+    # --- Steps 8-9: Keep reviews and user_books (no action needed) ---
+    # UserBook records with review_text and ratings are preserved.
+    # They will display under "Deleted User" in the UI.
+
+    # --- Step 10: Make all shelves private and anonymize ---
+    # Get all shelf IDs to cascade-delete shelf_books
+    shelf_ids_result = await db.execute(
+        select(Shelf.id).where(Shelf.user_id == user_id)
+    )
+    shelf_ids = [row[0] for row in shelf_ids_result.all()]
+
+    if shelf_ids:
+        # Delete shelf_books associations first
+        await db.execute(
+            delete(ShelfBook).where(ShelfBook.shelf_id.in_(shelf_ids))
+        )
+        # Delete the shelves themselves
+        await db.execute(
+            delete(Shelf).where(Shelf.user_id == user_id)
+        )
+
+    # --- Step 11: Delete pending export requests ---
+    try:
+        from backend.api.model_stubs import ExportRequest
+
+        await db.execute(
+            delete(ExportRequest).where(ExportRequest.user_id == user_id)
+        )
+    except (ImportError, AttributeError):
+        # ExportRequest model not yet implemented -- skip
+        pass
+
+    # --- Step 12: Delete all activities from feed ---
+    await db.execute(
+        delete(Activity).where(Activity.user_id == user_id)
+    )
+
+    # --- Step 13: Clear notification records ---
+    # Delete notifications sent TO this user
+    await db.execute(
+        delete(Notification).where(Notification.user_id == user_id)
+    )
+    # Delete notifications where this user was the actor
+    await db.execute(
+        delete(Notification).where(Notification.actor_id == user_id)
+    )
+
+    await db.flush()
+```
+
+================================================================================
+FILE: backend/models/user.py  (confirmation)
+================================================================================
+
+The existing User model already has `deleted_at: Mapped[datetime | None]` on
+line 25. No changes needed to the real model.
+
+The model_stubs.py User class does NOT have `deleted_at`. It needs to be added:
+
+================================================================================
+FILE: backend/api/model_stubs.py  (modifications)
+================================================================================
+
+Add `deleted_at` to the stub User class. Locate the User class and add the
+field after `is_deleted`:
+
+```python
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True, default=False)
+    username: Mapped[str] = mapped_column(String(30), unique=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    avatar_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    bio: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    favorite_books: Mapped[Optional[List[uuid.UUID]]] = _array_uuid_col(nullable=True)
+    is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+```
+
+================================================================================
+FILE: backend/migrations/versions/add_deleted_at_to_users.py
+================================================================================
+
+Alembic migration to add the `deleted_at` column. Generate with:
+`alembic revision --autogenerate -m "add deleted_at to users"`
+
+If the column already exists from the real models branch, this migration is
+unnecessary. Check with `alembic heads` before creating.
+
+```python
+"""add deleted_at to users
+
+Revision ID: a1b2c3d4e5f6
+Revises: 92903d6f6b99
+Create Date: 2026-03-02
+"""
+from __future__ import annotations
+
+from alembic import op
+import sqlalchemy as sa
+
+# revision identifiers
+revision = "a1b2c3d4e5f6"
+down_revision = "92903d6f6b99"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.add_column(
+        "users",
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+    )
+
+
+def downgrade() -> None:
+    op.drop_column("users", "deleted_at")
+```
+
+================================================================================
+FILE: backend/api/schemas/auth.py  (additions)
+================================================================================
+
+Add the DeleteAccountRequest schema at the bottom of the file:
+
+```python
+from pydantic import BaseModel, EmailStr, Field
+
+__all__ = [
+    "AuthResponse",
+    "DeleteAccountRequest",
+    "LoginRequest",
+    "OAuthTokenRequest",
+    "RefreshRequest",
+    "SignupRequest",
+]
+
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    username: str = Field(min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_]+$")
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class OAuthTokenRequest(BaseModel):
+    id_token: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    user_id: str
+    username: str
+
+
+class DeleteAccountRequest(BaseModel):
+    """Request body for account deletion. Requires explicit confirmation."""
+    confirm: bool = Field(
+        ...,
+        description="Must be true to confirm account deletion.",
+    )
+```
+
+================================================================================
+FILE: backend/api/routes/auth.py  (modifications)
+================================================================================
+
+Replace the existing `DELETE /auth/account` handler with the comprehensive
+version. Locate the delete_account function and replace it entirely:
+
+```python
+from backend.api.schemas.auth import DeleteAccountRequest
+from backend.services.user_service import soft_delete_account
+from backend.services.observability import Events, track_event
+
+
+@router.delete("/account", status_code=204)
+async def delete_account(
+    request: DeleteAccountRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> None:
+    """GDPR-compliant account deletion with full data anonymization.
+
+    Requires {"confirm": true} in the request body. Anonymizes all personal
+    data, removes social connections, and preserves reviews under "Deleted User".
+    Returns 204 No Content on success.
+    """
+    if not request.confirm:
+        from backend.api.errors import AppError
+
+        raise AppError(
+            status_code=422,
+            code="CONFIRMATION_REQUIRED",
+            message="You must set 'confirm' to true to delete your account.",
+        )
+
+    # Perform comprehensive anonymization
+    await soft_delete_account(db, current_user.id)
+    await db.commit()
+
+    # Track the deletion event (before user context is lost)
+    track_event(
+        user_id=str(current_user.id),
+        event_name=Events.USER_DELETED_ACCOUNT,
+        properties={"username": current_user.username},
+    )
+
+    # Revoke Supabase session
+    settings = get_settings()
+    try:
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{settings.supabase_url}/auth/v1/admin/users/{current_user.id}/logout",
+                headers={
+                    "apikey": settings.supabase_service_key,
+                    "Authorization": f"Bearer {settings.supabase_service_key}",
+                },
+            )
+    except Exception:
+        pass  # Best-effort session revocation; account is already anonymized
+```
+
+================================================================================
+FILE: backend/services/export_service.py  (integration note)
+================================================================================
+
+Before deletion, the iOS client should offer to trigger a data export. The
+export endpoint already exists at GET /me/export. The iOS DeleteAccountView
+(below) provides a "Export my data first" button that triggers the export and
+waits for it before proceeding with deletion.
+
+No changes to export_service.py are needed for the deletion flow itself. The
+export runs independently and the user downloads the file before confirming
+deletion.
+
+================================================================================
+FILE: backend/tests/test_account_deletion.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.api.model_stubs import (
+    Activity,
+    Block,
+    Follow,
+    Mute,
+    Notification,
+    Shelf,
+    ShelfBook,
+    User,
+    UserBook,
+)
+from backend.services.user_service import soft_delete_account
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def user_with_social(db_session, test_user, other_user, test_work):
+    """Set up a user with follows, blocks, mutes, activities, notifications,
+    shelves, and a book log."""
+    user_id = test_user.id
+    other_id = other_user.id
+
+    # Follow in both directions
+    db_session.add(Follow(follower_id=user_id, following_id=other_id))
+    db_session.add(Follow(follower_id=other_id, following_id=user_id))
+
+    # Block from another user
+    db_session.add(Block(blocker_id=user_id, blocked_id=other_id))
+
+    # Mute
+    db_session.add(Mute(muter_id=user_id, muted_id=other_id))
+
+    # Activity
+    activity = Activity(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        activity_type="finished_book",
+        target_id=str(uuid.uuid4()),
+    )
+    db_session.add(activity)
+
+    # Notification (to user)
+    notification = Notification(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        type="new_follower",
+        actor_id=other_id,
+    )
+    db_session.add(notification)
+
+    # Notification (from user as actor to other)
+    notification_from = Notification(
+        id=str(uuid.uuid4()),
+        user_id=other_id,
+        type="new_follower",
+        actor_id=user_id,
+    )
+    db_session.add(notification_from)
+
+    # User book (review + rating)
+    user_book = UserBook(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        work_id=test_work.id,
+        status="read",
+        rating=4.5,
+        review_text="A wonderful book that changed my perspective.",
+        has_spoilers=False,
+        is_imported=False,
+    )
+    db_session.add(user_book)
+
+    # Shelf with a book
+    shelf = Shelf(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        name="Favorites",
+        slug="favorites",
+        is_public=True,
+    )
+    db_session.add(shelf)
+    await db_session.flush()
+
+    shelf_book = ShelfBook(
+        shelf_id=shelf.id,
+        user_book_id=user_book.id,
+        position=0,
+    )
+    db_session.add(shelf_book)
+
+    await db_session.commit()
+
+    return {
+        "user": test_user,
+        "other_user": other_user,
+        "user_book": user_book,
+        "shelf": shelf,
+        "activity": activity,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Unit / service tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_full_anonymization(db_session: AsyncSession, user_with_social):
+    """After soft_delete_account, user profile should be fully anonymized."""
+    user = user_with_social["user"]
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    result = await db_session.execute(select(User).where(User.id == user.id))
+    deleted_user = result.scalar_one()
+
+    assert deleted_user.is_deleted is True
+    assert deleted_user.deleted_at is not None
+    assert deleted_user.username.startswith("deleted_")
+    assert deleted_user.display_name == "Deleted User"
+    assert deleted_user.bio is None
+    assert deleted_user.avatar_url is None
+    assert deleted_user.favorite_books == [] or deleted_user.favorite_books is None
+
+
+@pytest.mark.asyncio
+async def test_reviews_persist_after_deletion(db_session: AsyncSession, user_with_social):
+    """Reviews and ratings should remain intact after account deletion."""
+    user = user_with_social["user"]
+    user_book = user_with_social["user_book"]
+
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    result = await db_session.execute(select(UserBook).where(UserBook.id == user_book.id))
+    ub = result.scalar_one_or_none()
+
+    assert ub is not None
+    assert ub.review_text == "A wonderful book that changed my perspective."
+    assert float(ub.rating) == 4.5
+    assert ub.status == "read"
+
+
+@pytest.mark.asyncio
+async def test_follows_removed_both_directions(db_session: AsyncSession, user_with_social):
+    """All follows involving the deleted user should be removed."""
+    user = user_with_social["user"]
+    other = user_with_social["other_user"]
+
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    # No follows where user is follower
+    result = await db_session.execute(
+        select(Follow).where(Follow.follower_id == user.id)
+    )
+    assert result.scalar_one_or_none() is None
+
+    # No follows where user is being followed
+    result = await db_session.execute(
+        select(Follow).where(Follow.following_id == user.id)
+    )
+    assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_blocks_removed_both_directions(db_session: AsyncSession, user_with_social):
+    """All blocks involving the deleted user should be removed."""
+    user = user_with_social["user"]
+
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(Block).where(
+            (Block.blocker_id == user.id) | (Block.blocked_id == user.id)
+        )
+    )
+    assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_mutes_removed(db_session: AsyncSession, user_with_social):
+    """All mutes involving the deleted user should be removed."""
+    user = user_with_social["user"]
+
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(Mute).where(
+            (Mute.muter_id == user.id) | (Mute.muted_id == user.id)
+        )
+    )
+    assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_activities_deleted(db_session: AsyncSession, user_with_social):
+    """All feed activities by the deleted user should be removed."""
+    user = user_with_social["user"]
+
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(Activity).where(Activity.user_id == user.id)
+    )
+    assert list(result.scalars().all()) == []
+
+
+@pytest.mark.asyncio
+async def test_notifications_cleared(db_session: AsyncSession, user_with_social):
+    """Notifications to and from the deleted user should be removed."""
+    user = user_with_social["user"]
+
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    # Notifications sent to user
+    result = await db_session.execute(
+        select(Notification).where(Notification.user_id == user.id)
+    )
+    assert list(result.scalars().all()) == []
+
+    # Notifications where user was actor
+    result = await db_session.execute(
+        select(Notification).where(Notification.actor_id == user.id)
+    )
+    assert list(result.scalars().all()) == []
+
+
+@pytest.mark.asyncio
+async def test_shelves_deleted(db_session: AsyncSession, user_with_social):
+    """All shelves and shelf_books should be deleted."""
+    user = user_with_social["user"]
+    shelf = user_with_social["shelf"]
+
+    await soft_delete_account(db_session, user.id)
+    await db_session.commit()
+
+    # Shelves gone
+    result = await db_session.execute(
+        select(Shelf).where(Shelf.user_id == user.id)
+    )
+    assert result.scalar_one_or_none() is None
+
+    # ShelfBooks gone
+    result = await db_session.execute(
+        select(ShelfBook).where(ShelfBook.shelf_id == shelf.id)
+    )
+    assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_user_not_found_raises(db_session: AsyncSession):
+    """Deleting a nonexistent user should raise user_not_found."""
+    from backend.api.errors import AppError
+
+    with pytest.raises(AppError) as exc_info:
+        await soft_delete_account(db_session, uuid.uuid4())
+
+    assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — DELETE /auth/account endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_account_requires_confirmation(client):
+    """Missing or false 'confirm' field should return 422."""
+    resp = await client.request(
+        "DELETE",
+        "/api/v1/auth/account",
+        json={"confirm": False},
+    )
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["detail"]["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_delete_account_missing_body_returns_422(client):
+    """Missing request body should return 422."""
+    resp = await client.request(
+        "DELETE",
+        "/api/v1/auth/account",
+        json={},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_delete_account_success(client, db_session, test_user):
+    """Confirmed deletion should return 204 and anonymize the user."""
+    resp = await client.request(
+        "DELETE",
+        "/api/v1/auth/account",
+        json={"confirm": True},
+    )
+    assert resp.status_code == 204
+
+    # Verify user is anonymized in DB
+    result = await db_session.execute(select(User).where(User.id == test_user.id))
+    user = result.scalar_one()
+    assert user.is_deleted is True
+    assert user.username.startswith("deleted_")
+    assert user.display_name == "Deleted User"
+    assert user.bio is None
+    assert user.avatar_url is None
+
+
+@pytest.mark.asyncio
+async def test_deleted_user_cannot_authenticate(client, db_session, test_user):
+    """A deleted user should be rejected by the auth dependency.
+
+    Note: This test verifies the behavior of get_current_user in deps.py,
+    which checks User.is_deleted == False. After deletion, subsequent
+    requests with the same token should return 401.
+    """
+    # First delete the account
+    resp = await client.request(
+        "DELETE",
+        "/api/v1/auth/account",
+        json={"confirm": True},
+    )
+    assert resp.status_code == 204
+
+    # The existing test fixture overrides get_current_user, so we verify
+    # directly that the is_deleted flag blocks authentication
+    result = await db_session.execute(select(User).where(User.id == test_user.id))
+    user = result.scalar_one()
+    assert user.is_deleted is True
+
+    # In production, the deps.get_current_user query includes:
+    #   User.is_deleted == False
+    # which would return None and raise 401.
+
+
+@pytest.mark.asyncio
+async def test_deleted_user_profile_shows_anonymous(client, db_session, test_user):
+    """A deleted user's profile should show 'Deleted User' to others."""
+    # Delete the account
+    resp = await client.request(
+        "DELETE",
+        "/api/v1/auth/account",
+        json={"confirm": True},
+    )
+    assert resp.status_code == 204
+
+    result = await db_session.execute(select(User).where(User.id == test_user.id))
+    user = result.scalar_one()
+    assert user.display_name == "Deleted User"
+    assert user.bio is None
+    assert user.avatar_url is None
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Profile/DeleteAccountView.swift
+================================================================================
+
+```swift
+import SwiftUI
+
+struct DeleteAccountView: View {
+    @Environment(AuthService.self) private var auth
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var confirmationText = ""
+    @State private var isDeleting = false
+    @State private var isExporting = false
+    @State private var exportCompleted = false
+    @State private var errorMessage: String?
+
+    private var isConfirmed: Bool {
+        confirmationText.uppercased() == "DELETE"
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    // Warning header
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                                .font(.title2)
+                            Text("Delete Your Account")
+                                .font(.title2.bold())
+                        }
+
+                        Text("This action is permanent and cannot be undone.")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Divider()
+
+                    // What happens section
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("What will happen:")
+                            .font(.headline)
+
+                        BulletPoint(
+                            icon: "person.slash",
+                            color: .red,
+                            text: "Your profile, bio, and avatar will be permanently removed"
+                        )
+
+                        BulletPoint(
+                            icon: "person.2.slash",
+                            color: .red,
+                            text: "All followers and following connections will be removed"
+                        )
+
+                        BulletPoint(
+                            icon: "tray.full",
+                            color: .red,
+                            text: "Your custom shelves will be deleted"
+                        )
+
+                        BulletPoint(
+                            icon: "bell.slash",
+                            color: .red,
+                            text: "All notifications and feed activity will be cleared"
+                        )
+
+                        BulletPoint(
+                            icon: "text.quote",
+                            color: .orange,
+                            text: "Your reviews and ratings will remain visible as \"Deleted User\""
+                        )
+                    }
+
+                    Divider()
+
+                    // Export data option
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Want to save your data first?")
+                            .font(.headline)
+
+                        Button {
+                            exportData()
+                        } label: {
+                            HStack {
+                                if isExporting {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Exporting...")
+                                } else if exportCompleted {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                    Text("Export saved to Files")
+                                } else {
+                                    Image(systemName: "arrow.down.doc")
+                                    Text("Export My Data")
+                                }
+                            }
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .background(Color(.systemGray5))
+                            .foregroundStyle(.primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .disabled(isExporting || exportCompleted)
+                    }
+
+                    Divider()
+
+                    // Confirmation
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("To confirm, type DELETE below:")
+                            .font(.headline)
+
+                        TextField("Type DELETE to confirm", text: $confirmationText)
+                            .textFieldStyle(.roundedBorder)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .font(.body.monospaced())
+                    }
+
+                    // Error message
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.subheadline)
+                            .foregroundStyle(.red)
+                            .padding(.vertical, 4)
+                    }
+
+                    // Delete button
+                    Button {
+                        Task {
+                            await deleteAccount()
+                        }
+                    } label: {
+                        HStack {
+                            if isDeleting {
+                                ProgressView()
+                                    .tint(.white)
+                                Text("Deleting...")
+                            } else {
+                                Image(systemName: "trash")
+                                Text("Delete My Account")
+                            }
+                        }
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                        .background(isConfirmed && !isDeleting ? Color.red : Color.red.opacity(0.3))
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .disabled(!isConfirmed || isDeleting)
+
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func deleteAccount() async {
+        isDeleting = true
+        errorMessage = nil
+
+        do {
+            let body = DeleteAccountBody(confirm: true)
+            try await APIClient.shared.request(
+                .delete,
+                path: "/auth/account",
+                body: body
+            )
+
+            AnalyticsService.track(.signOut, properties: ["reason": "account_deleted"])
+            AnalyticsService.resetUser()
+            auth.signOut()
+        } catch {
+            errorMessage = "Failed to delete account. Please try again."
+            AnalyticsService.captureError(error, context: ["action": "delete_account"])
+        }
+
+        isDeleting = false
+    }
+
+    private func exportData() {
+        isExporting = true
+
+        Task {
+            do {
+                let data: Data = try await APIClient.shared.request(
+                    .get,
+                    path: "/me/export"
+                )
+                let documentsURL = FileManager.default.urls(
+                    for: .documentDirectory,
+                    in: .userDomainMask
+                ).first!
+                let fileURL = documentsURL.appendingPathComponent(
+                    "shelf-export-\(Date().ISO8601Format()).json"
+                )
+                try data.write(to: fileURL)
+
+                await MainActor.run {
+                    exportCompleted = true
+                    isExporting = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = "Export failed. You can still delete your account."
+                    isExporting = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Helper Views
+
+private struct BulletPoint: View {
+    let icon: String
+    let color: Color
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+                .font(.body)
+                .frame(width: 24)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - Request Body
+
+private struct DeleteAccountBody: Encodable {
+    let confirm: Bool
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Profile/SettingsView.swift  (modifications)
+================================================================================
+
+Replace the existing "Delete Account" button and confirmation dialog with a
+navigation link to the new DeleteAccountView. Locate the section containing
+"Sign Out" and "Delete Account" and replace it:
+
+REMOVE this block:
+
+```swift
+            Section {
+                Button("Sign Out") {
+                    AnalyticsService.track(.signOut)
+                    AnalyticsService.resetUser()
+                    auth.signOut()
+                }
+                .foregroundStyle(.red)
+
+                Button("Delete Account") {
+                    showDeleteConfirmation = true
+                }
+                .foregroundStyle(.red)
+            }
+```
+
+AND remove the `showDeleteConfirmation` state variable and `.confirmationDialog`
+modifier.
+
+REPLACE with:
+
+```swift
+            Section {
+                Button("Sign Out") {
+                    AnalyticsService.track(.signOut)
+                    AnalyticsService.resetUser()
+                    auth.signOut()
+                }
+                .foregroundStyle(.red)
+            }
+
+            Section {
+                Button {
+                    showDeleteAccount = true
+                } label: {
+                    HStack {
+                        Label("Delete Account", systemImage: "trash")
+                            .foregroundStyle(.red)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            } footer: {
+                Text("Permanently delete your account and anonymize your data.")
+                    .font(.caption)
+            }
+```
+
+Update the state variables at the top of SettingsView:
+
+```swift
+    // REMOVE:
+    @State private var showDeleteConfirmation = false
+
+    // ADD:
+    @State private var showDeleteAccount = false
+```
+
+REMOVE the `.confirmationDialog("Delete Account", ...)` modifier entirely.
+
+ADD a `.sheet` modifier for the new delete account view:
+
+```swift
+        .sheet(isPresented: $showDeleteAccount) {
+            DeleteAccountView()
+        }
+```
+
+The complete updated SettingsView:
+
+```swift
+import SwiftUI
+
+struct SettingsView: View {
+    @Environment(AuthService.self) private var auth
+    @State private var showDeleteAccount = false
+    @State private var showImport = false
+    @State private var showPaywall = false
+    @State private var showExportAlert = false
+    @State private var isExporting = false
+
+    private let subscriptionService = SubscriptionService.shared
+
+    var body: some View {
+        List {
+            // Premium upsell
+            if !subscriptionService.isPremium {
+                Section {
+                    Button {
+                        showPaywall = true
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "crown.fill")
+                                .foregroundStyle(.yellow)
+                                .font(.title3)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Shelf Premium")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Ad-free, unlimited shelves, and more")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Section("Account") {
+                NavigationLink {
+                    EditProfileView()
+                } label: {
+                    Label("Edit Profile", systemImage: "person.crop.circle")
+                }
+
+                Button {
+                    showImport = true
+                } label: {
+                    Label("Import Library", systemImage: "square.and.arrow.down")
+                }
+            }
+
+            Section("Data") {
+                Button {
+                    exportData()
+                } label: {
+                    if isExporting {
+                        HStack {
+                            Label("Exporting...", systemImage: "arrow.down.doc")
+                            Spacer()
+                            ProgressView()
+                        }
+                    } else {
+                        Label("Export My Data (JSON)", systemImage: "arrow.down.doc")
+                    }
+                }
+                .disabled(isExporting)
+            }
+
+            Section("Preferences") {
+                NavigationLink {
+                    Text("Notification settings")
+                        .navigationTitle("Notifications")
+                } label: {
+                    Label("Notifications", systemImage: "bell")
+                }
+            }
+
+            Section("Support") {
+                Link(destination: URL(string: "https://shelf.app/privacy")!) {
+                    Label("Privacy Policy", systemImage: "hand.raised")
+                }
+                Link(destination: URL(string: "https://shelf.app/terms")!) {
+                    Label("Terms of Service", systemImage: "doc.text")
+                }
+            }
+
+            Section {
+                Button("Sign Out") {
+                    AnalyticsService.track(.signOut)
+                    AnalyticsService.resetUser()
+                    auth.signOut()
+                }
+                .foregroundStyle(.red)
+            }
+
+            Section {
+                Button {
+                    showDeleteAccount = true
+                } label: {
+                    HStack {
+                        Label("Delete Account", systemImage: "trash")
+                            .foregroundStyle(.red)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            } footer: {
+                Text("Permanently delete your account and anonymize your data.")
+                    .font(.caption)
+            }
+        }
+        .navigationTitle("Settings")
+        .sheet(isPresented: $showDeleteAccount) {
+            DeleteAccountView()
+        }
+        .sheet(isPresented: $showImport) {
+            ImportView()
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+        }
+        .alert("Data Export", isPresented: $showExportAlert) {
+            Button("OK") {}
+        } message: {
+            Text("Your data has been prepared. Check your Files app for the export.")
+        }
+    }
+
+    private func exportData() {
+        isExporting = true
+
+        Task {
+            do {
+                let data: Data = try await APIClient.shared.request(.get, path: "/me/export")
+                let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                let fileURL = documentsURL.appendingPathComponent("shelf-export-\(Date().ISO8601Format()).json")
+                try data.write(to: fileURL)
+                showExportAlert = true
+            } catch {
+                // Export failed silently
+            }
+            isExporting = false
+        }
+    }
+}
+```

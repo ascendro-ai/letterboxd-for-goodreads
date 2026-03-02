@@ -3,6 +3,7 @@ import Foundation
 @Observable
 final class FeedViewModel {
     private(set) var items: [FeedItem] = []
+    private(set) var feedType: FeedType = .following
     private(set) var isLoading = false
     private(set) var isLoadingMore = false
     private(set) var error: Error?
@@ -10,6 +11,10 @@ final class FeedViewModel {
     private var hasMore = true
 
     private let feedService = FeedService.shared
+
+    var isPopularOrMixed: Bool {
+        feedType == .popular || feedType == .mixed
+    }
 
     @MainActor
     func loadFeed() async {
@@ -20,6 +25,7 @@ final class FeedViewModel {
         do {
             let response = try await feedService.getFeed()
             items = response.items
+            feedType = response.feedType
             nextCursor = response.nextCursor
             hasMore = response.hasMore
         } catch {

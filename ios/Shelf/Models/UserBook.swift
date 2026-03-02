@@ -43,6 +43,7 @@ struct UserBook: Codable, Identifiable, Hashable {
     let startedAt: Date?
     let finishedAt: Date?
     let isImported: Bool
+    let isPrivate: Bool
     let createdAt: Date
     let updatedAt: Date
 
@@ -58,6 +59,7 @@ struct UserBook: Codable, Identifiable, Hashable {
         case startedAt = "started_at"
         case finishedAt = "finished_at"
         case isImported = "is_imported"
+        case isPrivate = "is_private"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -71,6 +73,7 @@ struct LogBookRequest: Codable {
     var rating: Double?
     var reviewText: String?
     var hasSpoilers: Bool = false
+    var isPrivate: Bool = false
     var startedAt: Date?
     var finishedAt: Date?
 
@@ -79,6 +82,7 @@ struct LogBookRequest: Codable {
         case workID = "work_id"
         case reviewText = "review_text"
         case hasSpoilers = "has_spoilers"
+        case isPrivate = "is_private"
         case startedAt = "started_at"
         case finishedAt = "finished_at"
     }
@@ -89,6 +93,7 @@ struct UpdateBookRequest: Codable {
     var rating: Double?
     var reviewText: String?
     var hasSpoilers: Bool?
+    var isPrivate: Bool?
     var startedAt: Date?
     var finishedAt: Date?
 
@@ -96,6 +101,7 @@ struct UpdateBookRequest: Codable {
         case status, rating
         case reviewText = "review_text"
         case hasSpoilers = "has_spoilers"
+        case isPrivate = "is_private"
         case startedAt = "started_at"
         case finishedAt = "finished_at"
     }

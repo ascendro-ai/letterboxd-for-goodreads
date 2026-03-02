@@ -31,11 +31,32 @@ struct FeedView: View {
         .refreshable {
             await viewModel.refresh()
         }
+        .onChange(of: viewModel.items.count) {
+            adService.recalculateSpacing()
+        }
     }
 
     private var feedList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
+                // Cold start: show header + discover prompt for popular/mixed feeds
+                if viewModel.isPopularOrMixed {
+                    VStack(spacing: 12) {
+                        Text("Popular This Week")
+                            .font(.title3.weight(.semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                            .accessibilityAddTraits(.isHeader)
+
+                        DiscoverPromptCard()
+                    }
+
+                    Divider()
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                }
+
                 ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { index, item in
                     NavigationLink(value: item.book) {
                         FeedItemView(item: item)
@@ -45,7 +66,7 @@ struct FeedView: View {
                     Divider()
                         .padding(.horizontal)
 
-                    // Insert native ad card every N items
+                    // Insert native ad card at randomized intervals
                     if adService.shouldInsertAd(at: index) {
                         NativeAdCardView()
                         Divider()

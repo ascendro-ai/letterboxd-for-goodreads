@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.venv
+.env
+.git
+*.egg-info
+.pytest_cache
+.ruff_cache
+node_modules
+ios/
+docs/
+*.md
+.DS_Store

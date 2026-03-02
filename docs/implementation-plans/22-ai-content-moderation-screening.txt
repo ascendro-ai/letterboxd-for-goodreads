@@ -1,0 +1,462 @@
+================================================================================
+22 — AI Content Moderation: Real Screening on Submit
+Connecting the flagging system to actual AI moderation on review submission
+================================================================================
+
+Context: Plan 03 (content-moderation.txt) contains the full specification —
+ReviewFlag model, community flagging, OpenAI Moderation API integration, and
+auto-hide logic. The backend has the moderation_service.py file and flagging
+route, but the actual AI screening call (OpenAI Moderation API) needs real
+API credentials and proper wiring to review submission endpoints.
+
+This plan covers what's specifically still MISSING to go from flagging-only
+to real AI-powered content screening.
+
+================================================================================
+WHAT EXISTS (already built)
+================================================================================
+
+  - backend/services/moderation_service.py
+      - check_review_content() — calls OpenAI Moderation API
+      - flag_review() — community flagging with auto-hide at 3 flags
+      - get_flag_count() — count flags on a review
+  - backend/api/routes/moderation.py — POST /reviews/{id}/flag
+  - backend/api/schemas/moderation.py — request/response models
+  - backend/models/moderation.py — ReviewFlag model + migration
+  - backend/api/routes/user_books.py — moderation check in log_book/update_book
+  - backend/tests/test_moderation.py — tests for flagging + mocked AI check
+
+WHAT'S MISSING:
+  - openai_api_key is empty string → check_review_content() always returns
+    is_flagged=False (the skip-if-not-configured fallback)
+  - No Perspective API fallback (secondary signal)
+  - No "borderline" handling (save but auto-queue for review)
+  - No admin review queue endpoint
+
+================================================================================
+STEP 1: Get OpenAI Moderation API Access
+================================================================================
+
+The OpenAI Moderation API is FREE and does not consume API credits.
+
+a) Create account at https://platform.openai.com
+b) Generate API key: API Keys → Create new secret key
+c) Set environment variable:
+
+    Backend .env:
+      OPENAI_API_KEY=sk-xxxx
+
+d) Verify:
+    curl https://api.openai.com/v1/moderations \
+      -H "Authorization: Bearer sk-xxxx" \
+      -H "Content-Type: application/json" \
+      -d '{"input": "test text"}'
+
+    Response includes:
+      - results[0].flagged (bool)
+      - results[0].categories (object of category → bool)
+      - results[0].category_scores (object of category → float 0-1)
+
+That's it — the existing check_review_content() function in
+moderation_service.py already handles the API call. Setting the key
+activates it.
+
+
+================================================================================
+STEP 2: Add Perspective API as Secondary Signal (Optional Fallback)
+================================================================================
+
+The spec calls for Perspective API as a fallback/secondary signal. This
+adds it alongside the OpenAI check.
+
+────────────────────────────────────────────────────────────────────────────────
+SETUP:
+────────────────────────────────────────────────────────────────────────────────
+
+a) Request access at https://developers.perspectiveapi.com
+b) Enable API in Google Cloud Console
+c) Create API key
+
+    Backend .env:
+      PERSPECTIVE_API_KEY=AIza...
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/config.py  (addition)
+────────────────────────────────────────────────────────────────────────────────
+
+Add to Settings class:
+
+    perspective_api_key: str = ""
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/moderation_service.py  (add Perspective API check)
+────────────────────────────────────────────────────────────────────────────────
+
+Add after the existing check_review_content function:
+
+async def _check_perspective(text: str) -> ModerationResult:
+    """Secondary moderation check via Google Perspective API.
+
+    Checks for TOXICITY, SEVERE_TOXICITY, IDENTITY_ATTACK, INSULT, THREAT.
+    Used as a secondary signal alongside OpenAI Moderation.
+    """
+    settings = get_settings()
+
+    if not settings.perspective_api_key:
+        return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze",
+                params={"key": settings.perspective_api_key},
+                json={
+                    "comment": {"text": text},
+                    "requestedAttributes": {
+                        "TOXICITY": {},
+                        "SEVERE_TOXICITY": {},
+                        "IDENTITY_ATTACK": {},
+                        "INSULT": {},
+                        "THREAT": {},
+                    },
+                    "languages": ["en"],
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        flagged_categories = []
+        max_score = 0.0
+
+        for attr_name, attr_data in data.get("attributeScores", {}).items():
+            score = attr_data["summaryScore"]["value"]
+            if score > max_score:
+                max_score = score
+            if score > MODERATION_THRESHOLD:
+                flagged_categories.append(attr_name.lower())
+
+        return ModerationResult(
+            is_flagged=len(flagged_categories) > 0,
+            categories=flagged_categories,
+            confidence=max_score,
+        )
+
+    except Exception as e:
+        logger.error("Perspective API error: %s", str(e))
+        return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
+
+
+Modify check_review_content to combine both signals:
+
+async def check_review_content(text: str) -> ModerationResult:
+    """Run text through moderation — OpenAI primary, Perspective secondary.
+
+    Content is flagged if EITHER service flags it (union of signals).
+    On failure of either service, the other still runs independently.
+    """
+    settings = get_settings()
+
+    # Run both checks concurrently
+    import asyncio
+    openai_task = _check_openai(text) if settings.openai_api_key else _noop_result()
+    perspective_task = _check_perspective(text) if settings.perspective_api_key else _noop_result()
+
+    openai_result, perspective_result = await asyncio.gather(
+        openai_task, perspective_task
+    )
+
+    # Union of flagged categories from both services
+    all_categories = list(set(openai_result.categories + perspective_result.categories))
+    is_flagged = openai_result.is_flagged or perspective_result.is_flagged
+    confidence = max(openai_result.confidence, perspective_result.confidence)
+
+    return ModerationResult(
+        is_flagged=is_flagged,
+        categories=all_categories,
+        confidence=confidence,
+    )
+
+
+async def _noop_result() -> ModerationResult:
+    return ModerationResult(is_flagged=False, categories=[], confidence=0.0)
+
+Rename the existing OpenAI-specific logic to _check_openai(text).
+
+
+================================================================================
+STEP 3: Add Borderline Handling (Auto-Queue for Review)
+================================================================================
+
+The spec says: "If borderline: save but auto-insert into review queue with
+status: pending." Currently, the code either rejects (flagged) or accepts
+(not flagged). Add a middle ground.
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/services/moderation_service.py  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Add borderline threshold:
+
+# Content with confidence between these thresholds is "borderline"
+MODERATION_THRESHOLD = 0.7       # Above this → reject
+BORDERLINE_THRESHOLD = 0.4       # Between 0.4 and 0.7 → save but queue
+
+Add new result type:
+
+class ModerationResult(BaseModel):
+    is_flagged: bool        # True → reject the review
+    is_borderline: bool     # True → save but auto-queue for manual review
+    categories: list[str]
+    confidence: float
+
+Update the check function to set is_borderline when confidence is between
+BORDERLINE_THRESHOLD and MODERATION_THRESHOLD.
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/user_books.py  (modification)
+────────────────────────────────────────────────────────────────────────────────
+
+Update the moderation check in log_book and update_book:
+
+    if request.review_text:
+        moderation_result = await check_review_content(request.review_text)
+
+        if moderation_result.is_flagged:
+            raise AppError(
+                status_code=422,
+                code="REVIEW_FLAGGED",
+                message="Your review was flagged for potentially violating community guidelines.",
+            )
+
+        # Save the review (even if borderline)
+        result = await user_book_service.log_book(db, current_user.id, request)
+
+        # If borderline, auto-create a review flag for manual review
+        if moderation_result.is_borderline:
+            auto_flag = ReviewFlag(
+                flagger_user_id=current_user.id,  # system flag (self-flag for auto)
+                user_book_id=result.id,
+                reason="other",
+                description=f"Auto-flagged by AI moderation (confidence: {moderation_result.confidence:.2f}, categories: {', '.join(moderation_result.categories)})",
+                status="pending",
+            )
+            db.add(auto_flag)
+            await db.flush()
+
+        return result
+
+
+================================================================================
+STEP 4: Admin Review Queue (Minimal)
+================================================================================
+
+The spec says admin UI is out of scope for v1, but a simple API endpoint for
+reviewing flagged content is useful for manual review via curl/Postman.
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/api/routes/admin.py  (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+"""Minimal admin endpoints for content moderation review.
+
+Protected by service key auth (not user JWT). For v1, admin uses these
+via curl/Postman. A real admin UI can be built later.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, Header, HTTPException, Query, status
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.api.config import get_settings
+from backend.api.deps import DB
+from backend.api.model_stubs import ReviewFlag, UserBook
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _verify_admin(authorization: str | None) -> None:
+    """Verify admin access via service key."""
+    settings = get_settings()
+    expected = f"Bearer {settings.supabase_service_key}"
+    if not authorization or authorization != expected:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+@router.get("/flags")
+async def list_pending_flags(
+    db: DB,
+    authorization: str | None = Header(None),
+    status_filter: str = Query("pending"),
+    limit: int = Query(50, ge=1, le=200),
+) -> list[dict]:
+    """List flagged reviews pending review."""
+    _verify_admin(authorization)
+
+    result = await db.execute(
+        select(ReviewFlag)
+        .where(ReviewFlag.status == status_filter)
+        .order_by(ReviewFlag.created_at.desc())
+        .limit(limit)
+    )
+    flags = result.scalars().all()
+
+    return [
+        {
+            "id": str(f.id),
+            "user_book_id": str(f.user_book_id),
+            "reason": f.reason,
+            "description": f.description,
+            "status": f.status,
+            "created_at": str(f.created_at),
+        }
+        for f in flags
+    ]
+
+
+@router.post("/flags/{flag_id}/resolve")
+async def resolve_flag(
+    flag_id: UUID,
+    action: str,
+    db: DB,
+    authorization: str | None = Header(None),
+) -> dict[str, str]:
+    """Resolve a flag: 'dismiss' (keep review) or 'remove' (hide review).
+
+    Usage:
+      POST /api/v1/admin/flags/{id}/resolve?action=dismiss
+      POST /api/v1/admin/flags/{id}/resolve?action=remove
+    """
+    _verify_admin(authorization)
+
+    if action not in ("dismiss", "remove"):
+        raise HTTPException(400, "action must be 'dismiss' or 'remove'")
+
+    result = await db.execute(select(ReviewFlag).where(ReviewFlag.id == flag_id))
+    flag = result.scalar_one_or_none()
+    if not flag:
+        raise HTTPException(404, "Flag not found")
+
+    from datetime import datetime, timezone
+
+    if action == "remove":
+        flag.status = "removed"
+        flag.resolved_at = datetime.now(timezone.utc)
+        # Hide the review
+        await db.execute(
+            update(UserBook).where(UserBook.id == flag.user_book_id).values(is_hidden=True)
+        )
+    else:
+        flag.status = "dismissed"
+        flag.resolved_at = datetime.now(timezone.utc)
+
+    await db.flush()
+    return {"status": f"Flag {action}ed"}
+
+
+Register in main.py:
+
+    from backend.api.routes import admin
+    app.include_router(admin.router, prefix="/api/v1")
+
+
+================================================================================
+STEP 5: Tests for AI Screening
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FILE: backend/tests/test_moderation.py  (additions)
+────────────────────────────────────────────────────────────────────────────────
+
+Add these test cases alongside the existing ones:
+
+@pytest.mark.asyncio
+async def test_borderline_content_saved_but_queued(client, test_work, db_session):
+    """Borderline content is saved but auto-flagged for review."""
+    mock_result = ModerationResult(
+        is_flagged=False,
+        is_borderline=True,
+        categories=["harassment"],
+        confidence=0.55,
+    )
+
+    with patch(
+        "backend.api.routes.user_books.check_review_content",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ):
+        resp = await client.post(
+            "/api/v1/me/books",
+            json={
+                "work_id": str(test_work.id),
+                "status": "read",
+                "rating": 3.0,
+                "review_text": "Somewhat edgy but maybe acceptable review",
+            },
+        )
+
+    # Review is saved (201)
+    assert resp.status_code == 201
+
+    # But a flag was auto-created
+    from sqlalchemy import select
+    from backend.api.model_stubs import ReviewFlag
+
+    result = await db_session.execute(select(ReviewFlag))
+    flags = result.scalars().all()
+    assert len(flags) >= 1
+    assert "Auto-flagged" in flags[0].description
+
+
+@pytest.mark.asyncio
+async def test_perspective_api_fallback():
+    """Perspective API runs as secondary signal alongside OpenAI."""
+    from backend.services.moderation_service import _check_perspective
+
+    # Mock the HTTP call
+    with patch("backend.services.moderation_service.httpx.AsyncClient") as mock_client:
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "attributeScores": {
+                "TOXICITY": {"summaryScore": {"value": 0.9}},
+                "SEVERE_TOXICITY": {"summaryScore": {"value": 0.1}},
+            }
+        }
+        mock_response.raise_for_status = AsyncMock()
+
+        mock_client_instance = AsyncMock()
+        mock_client_instance.post.return_value = mock_response
+        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
+        mock_client.return_value = mock_client_instance
+
+        with patch("backend.services.moderation_service.get_settings") as mock_settings:
+            mock_settings.return_value.perspective_api_key = "test-key"
+            result = await _check_perspective("toxic text")
+
+        assert result.is_flagged is True
+        assert "toxicity" in result.categories
+
+
+================================================================================
+SUMMARY
+================================================================================
+
+To activate real AI screening:
+
+1. Set OPENAI_API_KEY in backend .env — immediately activates the existing
+   check_review_content() function. This is the minimum viable step.
+
+2. (Optional) Set PERSPECTIVE_API_KEY — adds secondary signal.
+
+3. (Optional) Add borderline handling — saves edgy content but queues it.
+
+4. (Optional) Add admin review queue — minimal curl-based review workflow.
+
+The existing code in moderation_service.py, user_books.py routes, and
+test_moderation.py already handles the happy path. Setting the API key
+is literally the only required step.

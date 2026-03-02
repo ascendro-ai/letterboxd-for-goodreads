@@ -1,0 +1,1412 @@
+================================================================================
+IMPLEMENTATION PLAN: Friend Discovery (Contacts Sync + Taste Suggestions)
+================================================================================
+
+Feature: Friend discovery via contacts sync (hashed phone/email matching) and
+taste-based suggestions. Shown during onboarding after import, also accessible
+from Settings. Includes three discovery methods: contacts, taste match, and
+popular users.
+
+================================================================================
+FILE: backend/models/discovery.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base, TimestampMixin, UUIDMixin
+
+
+class UserContactHash(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "user_contact_hashes"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    hash_type: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("hash", "hash_type", name="uq_contact_hash"),
+    )
+```
+
+================================================================================
+FILE: backend/models/__init__.py  (modifications)
+================================================================================
+
+Add the UserContactHash import alongside the existing model imports:
+
+```python
+from .discovery import UserContactHash
+```
+
+And add to __all__:
+
+```python
+"UserContactHash",
+```
+
+================================================================================
+FILE: backend/api/model_stubs.py  (additions)
+================================================================================
+
+Add the UserContactHash stub model at the bottom of model_stubs.py, after the
+existing models:
+
+```python
+class UserContactHash(TimestampMixin, Base):
+    __tablename__ = "user_contact_hashes"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    hash: Mapped[str] = mapped_column(String(64))
+    hash_type: Mapped[str] = mapped_column(String(10))
+```
+
+Also add the import in conftest.py alongside other model stub imports:
+
+```python
+from backend.api.model_stubs import (  # noqa: E402
+    Author,
+    Base,
+    Block,
+    Edition,
+    Follow,
+    Mute,
+    TasteMatch,
+    User,
+    UserContactHash,
+    Work,
+)
+```
+
+================================================================================
+FILE: backend/migrations/versions/add_user_contact_hashes.py
+================================================================================
+
+```python
+"""add user_contact_hashes table
+
+Revision ID: b2c3d4e5f6a7
+Revises: a1b2c3d4e5f6
+Create Date: 2026-03-02 16:30:00.000000
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'b2c3d4e5f6a7'
+down_revision: Union[str, None] = 'a1b2c3d4e5f6'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.create_table('user_contact_hashes',
+        sa.Column('user_id', sa.Uuid(), nullable=False),
+        sa.Column('hash', sa.String(length=64), nullable=False),
+        sa.Column('hash_type', sa.String(length=10), nullable=False),
+        sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('hash', 'hash_type', name='uq_contact_hash'),
+    )
+    op.create_index(op.f('ix_user_contact_hashes_user_id'), 'user_contact_hashes', ['user_id'], unique=False)
+    op.create_index(op.f('ix_user_contact_hashes_hash'), 'user_contact_hashes', ['hash'], unique=False)
+
+
+def downgrade() -> None:
+    op.drop_index(op.f('ix_user_contact_hashes_hash'), table_name='user_contact_hashes')
+    op.drop_index(op.f('ix_user_contact_hashes_user_id'), table_name='user_contact_hashes')
+    op.drop_table('user_contact_hashes')
+```
+
+================================================================================
+FILE: backend/api/schemas/discovery.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from decimal import Decimal
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+__all__ = ["ContactHashesRequest", "DiscoverUserResponse", "DiscoverUsersResponse"]
+
+
+class ContactHashesRequest(BaseModel):
+    hashes: list[str] = Field(max_length=500)
+
+
+class DiscoverUserResponse(BaseModel):
+    id: UUID
+    username: str
+    display_name: str | None = None
+    avatar_url: str | None = None
+    taste_match_score: Decimal | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class DiscoverUsersResponse(BaseModel):
+    users: list[DiscoverUserResponse]
+```
+
+================================================================================
+FILE: backend/services/discover_service.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import hashlib
+from uuid import UUID
+
+from backend.api.model_stubs import (
+    Block,
+    Follow,
+    TasteMatch,
+    User,
+    UserContactHash,
+)
+from backend.api.schemas.discovery import DiscoverUserResponse
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def store_user_hashes(
+    db: AsyncSession,
+    user_id: UUID,
+    email: str,
+    phone: str | None = None,
+) -> None:
+    """Store hashed contact info for a user during signup.
+
+    The backend hashes the user's own email and phone server-side so they
+    can be discovered by other users who upload contact hashes.
+    """
+    hashes_to_store: list[tuple[str, str]] = []
+
+    # Hash the user's email (normalize: lowercase, strip whitespace)
+    normalized_email = email.strip().lower()
+    email_hash = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+    hashes_to_store.append((email_hash, "email"))
+
+    # Hash the user's phone if provided (normalize: strip non-digits)
+    if phone:
+        normalized_phone = "".join(c for c in phone if c.isdigit())
+        if normalized_phone:
+            phone_hash = hashlib.sha256(normalized_phone.encode("utf-8")).hexdigest()
+            hashes_to_store.append((phone_hash, "phone"))
+
+    for hash_value, hash_type in hashes_to_store:
+        # Check if this hash already exists (upsert behavior)
+        existing = await db.execute(
+            select(UserContactHash).where(
+                UserContactHash.hash == hash_value,
+                UserContactHash.hash_type == hash_type,
+            )
+        )
+        if existing.scalar_one_or_none() is None:
+            contact_hash = UserContactHash(
+                user_id=user_id,
+                hash=hash_value,
+                hash_type=hash_type,
+            )
+            db.add(contact_hash)
+
+    await db.flush()
+
+
+async def find_contacts(
+    db: AsyncSession,
+    current_user_id: UUID,
+    hashes: list[str],
+) -> list[DiscoverUserResponse]:
+    """Find registered users whose contact info matches the uploaded hashes.
+
+    The client hashes contacts locally (email/phone -> SHA-256 hex) and uploads
+    the hashes. We match against stored user_contact_hashes to find users.
+    Excludes the current user and blocked users.
+    """
+    if not hashes:
+        return []
+
+    # Subquery: users blocked by or blocking the current user
+    blocked_ids = select(Block.blocked_id).where(Block.blocker_id == current_user_id)
+    blocked_by_ids = select(Block.blocker_id).where(Block.blocked_id == current_user_id)
+
+    # Find user IDs that match any of the uploaded hashes
+    stmt = (
+        select(
+            User.id,
+            User.username,
+            User.display_name,
+            User.avatar_url,
+        )
+        .join(UserContactHash, UserContactHash.user_id == User.id)
+        .where(
+            UserContactHash.hash.in_(hashes),
+            User.id != current_user_id,
+            User.is_deleted == False,  # noqa: E712
+            User.id.notin_(blocked_ids),
+            User.id.notin_(blocked_by_ids),
+        )
+        .group_by(User.id, User.username, User.display_name, User.avatar_url)
+    )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return []
+
+    # Fetch taste match scores for matched users
+    user_ids = [row.id for row in rows]
+    taste_stmt = select(TasteMatch).where(
+        or_(
+            and_(
+                TasteMatch.user_a_id == current_user_id,
+                TasteMatch.user_b_id.in_(user_ids),
+            ),
+            and_(
+                TasteMatch.user_b_id == current_user_id,
+                TasteMatch.user_a_id.in_(user_ids),
+            ),
+        )
+    )
+    taste_result = await db.execute(taste_stmt)
+    taste_matches = taste_result.scalars().all()
+
+    # Build a map of user_id -> match_score
+    score_map: dict[UUID, float] = {}
+    for tm in taste_matches:
+        other_id = tm.user_b_id if str(tm.user_a_id) == str(current_user_id) else tm.user_a_id
+        score_map[other_id] = tm.match_score
+
+    return [
+        DiscoverUserResponse(
+            id=row.id,
+            username=row.username,
+            display_name=row.display_name,
+            avatar_url=row.avatar_url,
+            taste_match_score=score_map.get(row.id),
+        )
+        for row in rows
+    ]
+
+
+async def get_taste_suggestions(
+    db: AsyncSession,
+    user_id: UUID,
+    limit: int = 20,
+) -> list[DiscoverUserResponse]:
+    """Get users with the highest taste match scores who the current user
+    is not yet following. Excludes blocked and muted users.
+    """
+    # Subquery: users already followed
+    following_ids = select(Follow.following_id).where(Follow.follower_id == user_id)
+
+    # Subquery: blocked users (both directions)
+    blocked_ids = select(Block.blocked_id).where(Block.blocker_id == user_id)
+    blocked_by_ids = select(Block.blocker_id).where(Block.blocked_id == user_id)
+
+    # Query taste matches where the current user is either side
+    stmt = (
+        select(
+            User.id,
+            User.username,
+            User.display_name,
+            User.avatar_url,
+            TasteMatch.match_score,
+        )
+        .join(
+            TasteMatch,
+            or_(
+                and_(
+                    TasteMatch.user_b_id == User.id,
+                    TasteMatch.user_a_id == user_id,
+                ),
+                and_(
+                    TasteMatch.user_a_id == User.id,
+                    TasteMatch.user_b_id == user_id,
+                ),
+            ),
+        )
+        .where(
+            User.id != user_id,
+            User.is_deleted == False,  # noqa: E712
+            User.id.notin_(following_ids),
+            User.id.notin_(blocked_ids),
+            User.id.notin_(blocked_by_ids),
+        )
+        .order_by(TasteMatch.match_score.desc())
+        .limit(limit)
+    )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    return [
+        DiscoverUserResponse(
+            id=row.id,
+            username=row.username,
+            display_name=row.display_name,
+            avatar_url=row.avatar_url,
+            taste_match_score=row.match_score,
+        )
+        for row in rows
+    ]
+
+
+async def get_popular_users(
+    db: AsyncSession,
+    user_id: UUID,
+    limit: int = 20,
+) -> list[DiscoverUserResponse]:
+    """Get popular users ordered by follower count, excluding the current
+    user, blocked users, and already-followed users.
+    """
+    # Subquery: users already followed
+    following_ids = select(Follow.following_id).where(Follow.follower_id == user_id)
+
+    # Subquery: blocked users (both directions)
+    blocked_ids = select(Block.blocked_id).where(Block.blocker_id == user_id)
+    blocked_by_ids = select(Block.blocker_id).where(Block.blocked_id == user_id)
+
+    # Count followers per user
+    follower_count = (
+        select(
+            Follow.following_id.label("user_id"),
+            func.count().label("follower_count"),
+        )
+        .group_by(Follow.following_id)
+        .subquery()
+    )
+
+    stmt = (
+        select(
+            User.id,
+            User.username,
+            User.display_name,
+            User.avatar_url,
+            follower_count.c.follower_count,
+        )
+        .outerjoin(follower_count, follower_count.c.user_id == User.id)
+        .where(
+            User.id != user_id,
+            User.is_deleted == False,  # noqa: E712
+            User.id.notin_(following_ids),
+            User.id.notin_(blocked_ids),
+            User.id.notin_(blocked_by_ids),
+        )
+        .order_by(follower_count.c.follower_count.desc().nullslast())
+        .limit(limit)
+    )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    return [
+        DiscoverUserResponse(
+            id=row.id,
+            username=row.username,
+            display_name=row.display_name,
+            avatar_url=row.avatar_url,
+            taste_match_score=None,
+        )
+        for row in rows
+    ]
+```
+
+================================================================================
+FILE: backend/api/routes/discover.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+from backend.api.deps import DB, CurrentUser
+from backend.api.schemas.discovery import (
+    ContactHashesRequest,
+    DiscoverUserResponse,
+    DiscoverUsersResponse,
+)
+from backend.services import discover_service
+from fastapi import APIRouter, Query
+
+router = APIRouter()
+
+
+@router.post("/contacts", response_model=DiscoverUsersResponse)
+async def find_contacts(
+    request: ContactHashesRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> DiscoverUsersResponse:
+    """Upload hashed contacts (SHA-256 hex of emails/phones) to find registered friends."""
+    users = await discover_service.find_contacts(
+        db, current_user.id, request.hashes
+    )
+    return DiscoverUsersResponse(users=users)
+
+
+@router.get("/taste", response_model=DiscoverUsersResponse)
+async def taste_suggestions(
+    db: DB,
+    current_user: CurrentUser,
+    limit: int = Query(20, ge=1, le=100),
+) -> DiscoverUsersResponse:
+    """Get users with high taste match scores that you're not yet following."""
+    users = await discover_service.get_taste_suggestions(
+        db, current_user.id, limit
+    )
+    return DiscoverUsersResponse(users=users)
+
+
+@router.get("/popular", response_model=DiscoverUsersResponse)
+async def popular_users(
+    db: DB,
+    current_user: CurrentUser,
+    limit: int = Query(20, ge=1, le=100),
+) -> DiscoverUsersResponse:
+    """Get popular users to follow, ordered by follower count."""
+    users = await discover_service.get_popular_users(
+        db, current_user.id, limit
+    )
+    return DiscoverUsersResponse(users=users)
+```
+
+================================================================================
+FILE: backend/api/main.py  (modifications)
+================================================================================
+
+Add the discover router import and registration. In the create_app function,
+add these lines alongside the existing router registrations:
+
+```python
+from backend.api.routes import auth, books, discover, feed, import_, shelves, user_books, users
+
+app.include_router(discover.router, prefix="/api/v1/me/discover", tags=["discover"])
+```
+
+The full router registration block becomes:
+
+```python
+    # Register routers
+    from backend.api.routes import auth, books, discover, feed, import_, shelves, user_books, users
+
+    app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+    app.include_router(books.router, prefix="/api/v1/books", tags=["books"])
+    app.include_router(users.router, prefix="/api/v1", tags=["users"])
+    app.include_router(user_books.router, prefix="/api/v1", tags=["user_books"])
+    app.include_router(shelves.router, prefix="/api/v1", tags=["shelves"])
+    app.include_router(feed.router, prefix="/api/v1", tags=["feed"])
+    app.include_router(import_.router, prefix="/api/v1/me/import", tags=["import"])
+    app.include_router(discover.router, prefix="/api/v1/me/discover", tags=["discover"])
+```
+
+================================================================================
+FILE: backend/tests/test_discovery.py
+================================================================================
+
+```python
+from __future__ import annotations
+
+import hashlib
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from backend.api.model_stubs import (
+    Block,
+    Follow,
+    TasteMatch,
+    User,
+    UserContactHash,
+)
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@pytest.fixture
+async def discoverable_user(db_session):
+    """A second user who has stored contact hashes."""
+    user = User(
+        id=str(uuid.uuid4()),
+        username="discoverable",
+        display_name="Discoverable User",
+        is_premium=False,
+        is_deleted=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    # Store an email hash for this user
+    email_hash = _sha256("discoverable@example.com")
+    contact = UserContactHash(
+        id=str(uuid.uuid4()),
+        user_id=str(user.id),
+        hash=email_hash,
+        hash_type="email",
+    )
+    db_session.add(contact)
+    await db_session.commit()
+
+    return user
+
+
+@pytest.fixture
+async def popular_users(db_session):
+    """Create several users with different follower counts."""
+    users = []
+    for i in range(5):
+        user = User(
+            id=str(uuid.uuid4()),
+            username=f"popular{i}",
+            display_name=f"Popular User {i}",
+            is_premium=False,
+            is_deleted=False,
+        )
+        db_session.add(user)
+        users.append(user)
+
+    await db_session.commit()
+    for u in users:
+        await db_session.refresh(u)
+
+    # Give user[0] the most followers (3), user[1] gets 2, user[2] gets 1
+    follower_sources = []
+    for i in range(3):
+        src = User(
+            id=str(uuid.uuid4()),
+            username=f"follower_src_{i}",
+            display_name=f"Follower Source {i}",
+            is_premium=False,
+            is_deleted=False,
+        )
+        db_session.add(src)
+        follower_sources.append(src)
+    await db_session.commit()
+    for s in follower_sources:
+        await db_session.refresh(s)
+
+    # user[0] gets 3 followers
+    for src in follower_sources:
+        db_session.add(
+            Follow(follower_id=str(src.id), following_id=str(users[0].id))
+        )
+    # user[1] gets 2 followers
+    for src in follower_sources[:2]:
+        db_session.add(
+            Follow(follower_id=str(src.id), following_id=str(users[1].id))
+        )
+    # user[2] gets 1 follower
+    db_session.add(
+        Follow(follower_id=str(follower_sources[0].id), following_id=str(users[2].id))
+    )
+
+    await db_session.commit()
+    return users
+
+
+# ---------------------------------------------------------------------------
+# Contact matching tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_contacts_matches_email_hash(client, discoverable_user):
+    """Upload a hash that matches a registered user's email hash."""
+    email_hash = _sha256("discoverable@example.com")
+    resp = await client.post(
+        "/api/v1/me/discover/contacts",
+        json={"hashes": [email_hash]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 1
+    assert data["users"][0]["username"] == "discoverable"
+
+
+@pytest.mark.asyncio
+async def test_find_contacts_no_self_match(client, db_session, test_user, test_user_id):
+    """The current user should not appear in their own contact matches."""
+    email_hash = _sha256("myself@example.com")
+    contact = UserContactHash(
+        id=str(uuid.uuid4()),
+        user_id=str(test_user_id),
+        hash=email_hash,
+        hash_type="email",
+    )
+    db_session.add(contact)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/me/discover/contacts",
+        json={"hashes": [email_hash]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_find_contacts_excludes_blocked_users(
+    client, db_session, discoverable_user, test_user_id
+):
+    """Blocked users should not appear in contact matches."""
+    block = Block(
+        blocker_id=str(test_user_id),
+        blocked_id=str(discoverable_user.id),
+    )
+    db_session.add(block)
+    await db_session.commit()
+
+    email_hash = _sha256("discoverable@example.com")
+    resp = await client.post(
+        "/api/v1/me/discover/contacts",
+        json={"hashes": [email_hash]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_find_contacts_empty_hashes(client):
+    """Uploading an empty list returns empty results."""
+    resp = await client.post(
+        "/api/v1/me/discover/contacts",
+        json={"hashes": []},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_find_contacts_no_matches(client):
+    """Uploading hashes that match no one returns empty results."""
+    resp = await client.post(
+        "/api/v1/me/discover/contacts",
+        json={"hashes": [_sha256("nobody@nowhere.com")]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Taste suggestion tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_taste_suggestions_returns_matches(client, db_session, other_user, test_user_id):
+    """Users with taste match records are returned, ordered by score."""
+    taste = TasteMatch(
+        user_a_id=str(test_user_id),
+        user_b_id=str(other_user.id),
+        match_score=Decimal("0.875"),
+        overlapping_books_count=12,
+        computed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(taste)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/me/discover/taste")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 1
+    assert data["users"][0]["username"] == "otheruser"
+    assert float(data["users"][0]["taste_match_score"]) == pytest.approx(0.875, abs=0.001)
+
+
+@pytest.mark.asyncio
+async def test_taste_suggestions_excludes_already_followed(
+    client, db_session, other_user, test_user_id
+):
+    """Already-followed users should not appear in taste suggestions."""
+    taste = TasteMatch(
+        user_a_id=str(test_user_id),
+        user_b_id=str(other_user.id),
+        match_score=Decimal("0.900"),
+        overlapping_books_count=15,
+        computed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(taste)
+
+    follow = Follow(
+        follower_id=str(test_user_id),
+        following_id=str(other_user.id),
+    )
+    db_session.add(follow)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/me/discover/taste")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_taste_suggestions_excludes_blocked(
+    client, db_session, other_user, test_user_id
+):
+    """Blocked users should not appear in taste suggestions."""
+    taste = TasteMatch(
+        user_a_id=str(test_user_id),
+        user_b_id=str(other_user.id),
+        match_score=Decimal("0.950"),
+        overlapping_books_count=20,
+        computed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(taste)
+
+    block = Block(
+        blocker_id=str(test_user_id),
+        blocked_id=str(other_user.id),
+    )
+    db_session.add(block)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/me/discover/taste")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_taste_suggestions_empty_when_no_matches(client):
+    """Returns empty when user has no taste matches."""
+    resp = await client.get("/api/v1/me/discover/taste")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Popular users tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_popular_users_ordered_by_follower_count(client, popular_users):
+    """Popular users endpoint returns users ordered by follower count descending."""
+    resp = await client.get("/api/v1/me/discover/popular")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["users"]) >= 3
+    # First user should be the one with most followers (popular0 has 3)
+    assert data["users"][0]["username"] == "popular0"
+    assert data["users"][1]["username"] == "popular1"
+    assert data["users"][2]["username"] == "popular2"
+
+
+@pytest.mark.asyncio
+async def test_popular_users_excludes_already_followed(
+    client, db_session, popular_users, test_user_id
+):
+    """Already-followed users should not appear in popular suggestions."""
+    follow = Follow(
+        follower_id=str(test_user_id),
+        following_id=str(popular_users[0].id),
+    )
+    db_session.add(follow)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/me/discover/popular")
+    assert resp.status_code == 200
+    data = resp.json()
+    usernames = [u["username"] for u in data["users"]]
+    assert "popular0" not in usernames
+
+
+@pytest.mark.asyncio
+async def test_popular_users_excludes_blocked(
+    client, db_session, popular_users, test_user_id
+):
+    """Blocked users should not appear in popular suggestions."""
+    block = Block(
+        blocker_id=str(test_user_id),
+        blocked_id=str(popular_users[0].id),
+    )
+    db_session.add(block)
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/me/discover/popular")
+    assert resp.status_code == 200
+    data = resp.json()
+    usernames = [u["username"] for u in data["users"]]
+    assert "popular0" not in usernames
+
+
+@pytest.mark.asyncio
+async def test_popular_users_empty_results(client):
+    """Returns empty when there are no other users."""
+    resp = await client.get("/api/v1/me/discover/popular")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["users"] == []
+```
+
+================================================================================
+FILE: ios/Shelf/Models/Discovery.swift
+================================================================================
+
+```swift
+import Foundation
+
+struct DiscoverUser: Codable, Identifiable {
+    let id: UUID
+    let username: String
+    let displayName: String?
+    let avatarURL: String?
+    let tasteMatchScore: Decimal?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case username
+        case displayName = "display_name"
+        case avatarURL = "avatar_url"
+        case tasteMatchScore = "taste_match_score"
+    }
+}
+
+struct DiscoverUsersResponse: Codable {
+    let users: [DiscoverUser]
+}
+
+struct ContactHashesRequest: Codable {
+    let hashes: [String]
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Services/DiscoverService.swift
+================================================================================
+
+```swift
+import Foundation
+
+@Observable
+final class DiscoverService {
+    static let shared = DiscoverService()
+
+    private init() {}
+
+    func findContacts(hashes: [String]) async throws -> [DiscoverUser] {
+        let body = ContactHashesRequest(hashes: hashes)
+        let response: DiscoverUsersResponse = try await APIClient.shared.request(
+            method: .post,
+            path: "/me/discover/contacts",
+            body: body
+        )
+        return response.users
+    }
+
+    func getTasteSuggestions() async throws -> [DiscoverUser] {
+        let response: DiscoverUsersResponse = try await APIClient.shared.request(
+            method: .get,
+            path: "/me/discover/taste"
+        )
+        return response.users
+    }
+
+    func getPopularUsers() async throws -> [DiscoverUser] {
+        let response: DiscoverUsersResponse = try await APIClient.shared.request(
+            method: .get,
+            path: "/me/discover/popular"
+        )
+        return response.users
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Services/ContactsHelper.swift
+================================================================================
+
+```swift
+import Contacts
+import CryptoKit
+import Foundation
+
+struct ContactsHelper {
+    /// Request authorization to access the user's contacts.
+    /// Returns true if access is granted, false otherwise.
+    static func requestContactsAccess() async -> Bool {
+        let store = CNContactStore()
+        do {
+            return try await store.requestAccess(for: .contacts)
+        } catch {
+            return false
+        }
+    }
+
+    /// Fetch all contacts, extract email addresses and phone numbers,
+    /// normalize them, hash each with SHA-256, and return the hex strings.
+    /// Returns an empty array if contacts cannot be accessed or an error occurs.
+    static func fetchContactHashes() async -> [String] {
+        let store = CNContactStore()
+
+        let keysToFetch: [CNKeyDescriptor] = [
+            CNContactEmailAddressesKey as CNKeyDescriptor,
+            CNContactPhoneNumbersKey as CNKeyDescriptor,
+        ]
+
+        var hashes: Set<String> = []
+
+        do {
+            let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        try store.enumerateContacts(with: request) { contact, _ in
+                            // Hash email addresses
+                            for email in contact.emailAddresses {
+                                let normalized = (email.value as String)
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .lowercased()
+                                if !normalized.isEmpty {
+                                    let hash = sha256Hex(normalized)
+                                    hashes.insert(hash)
+                                }
+                            }
+
+                            // Hash phone numbers
+                            for phone in contact.phoneNumbers {
+                                let digits = phone.value.stringValue
+                                    .unicodeScalars
+                                    .filter { CharacterSet.decimalDigits.contains($0) }
+                                    .map { String($0) }
+                                    .joined()
+                                if !digits.isEmpty {
+                                    let hash = sha256Hex(digits)
+                                    hashes.insert(hash)
+                                }
+                            }
+                        }
+                        continuation.resume()
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } catch {
+            return []
+        }
+
+        return Array(hashes)
+    }
+
+    /// Compute SHA-256 hash of a string and return the hex digest.
+    private static func sha256Hex(_ input: String) -> String {
+        let data = Data(input.utf8)
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/ViewModels/DiscoverViewModel.swift
+================================================================================
+
+```swift
+import Foundation
+
+@Observable
+final class DiscoverViewModel {
+    private(set) var contactMatches: [DiscoverUser] = []
+    private(set) var tasteSuggestions: [DiscoverUser] = []
+    private(set) var popularUsers: [DiscoverUser] = []
+
+    private(set) var isLoadingContacts: Bool = false
+    private(set) var isLoadingTaste: Bool = false
+    private(set) var isLoadingPopular: Bool = false
+
+    private(set) var error: String?
+
+    @MainActor
+    func loadContactMatches() async {
+        isLoadingContacts = true
+        error = nil
+
+        let granted = await ContactsHelper.requestContactsAccess()
+        guard granted else {
+            isLoadingContacts = false
+            error = "Contacts access is required to find friends. You can enable it in Settings."
+            return
+        }
+
+        let hashes = await ContactsHelper.fetchContactHashes()
+        guard !hashes.isEmpty else {
+            isLoadingContacts = false
+            return
+        }
+
+        do {
+            contactMatches = try await DiscoverService.shared.findContacts(hashes: hashes)
+        } catch {
+            self.error = "Failed to search contacts. Please try again."
+        }
+
+        isLoadingContacts = false
+    }
+
+    @MainActor
+    func loadTasteSuggestions() async {
+        isLoadingTaste = true
+        error = nil
+
+        do {
+            tasteSuggestions = try await DiscoverService.shared.getTasteSuggestions()
+        } catch {
+            self.error = "Failed to load taste suggestions. Please try again."
+        }
+
+        isLoadingTaste = false
+    }
+
+    @MainActor
+    func loadPopularUsers() async {
+        isLoadingPopular = true
+        error = nil
+
+        do {
+            popularUsers = try await DiscoverService.shared.getPopularUsers()
+        } catch {
+            self.error = "Failed to load popular users. Please try again."
+        }
+
+        isLoadingPopular = false
+    }
+
+    @MainActor
+    func followUser(id: UUID) async {
+        do {
+            try await SocialService.shared.follow(userID: id)
+
+            // Remove from all suggestion lists
+            contactMatches.removeAll { $0.id == id }
+            tasteSuggestions.removeAll { $0.id == id }
+            popularUsers.removeAll { $0.id == id }
+        } catch {
+            self.error = "Failed to follow user. Please try again."
+        }
+    }
+}
+```
+
+================================================================================
+FILE: ios/Shelf/Views/Discover/FindFriendsView.swift
+================================================================================
+
+```swift
+import SwiftUI
+
+struct FindFriendsView: View {
+    @State private var viewModel = DiscoverViewModel()
+    @State private var followedUserIDs: Set<UUID> = []
+
+    var isOnboarding: Bool = false
+    var onDismiss: (() -> Void)?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // Error banner
+                if let error = viewModel.error {
+                    Section {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .font(.callout)
+                    }
+                }
+
+                // Section 1: From Your Contacts
+                Section {
+                    if viewModel.isLoadingContacts {
+                        HStack {
+                            Spacer()
+                            ProgressView("Searching contacts...")
+                            Spacer()
+                        }
+                    } else if viewModel.contactMatches.isEmpty {
+                        Button {
+                            Task {
+                                await viewModel.loadContactMatches()
+                            }
+                        } label: {
+                            Label("Sync Contacts", systemImage: "person.crop.circle.badge.plus")
+                        }
+                    } else {
+                        ForEach(viewModel.contactMatches) { user in
+                            DiscoverUserRow(
+                                user: user,
+                                isFollowed: followedUserIDs.contains(user.id),
+                                onFollow: {
+                                    Task {
+                                        followedUserIDs.insert(user.id)
+                                        await viewModel.followUser(id: user.id)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                } header: {
+                    Text("From Your Contacts")
+                } footer: {
+                    if viewModel.contactMatches.isEmpty && !viewModel.isLoadingContacts {
+                        Text("Find friends who are already on Shelf by syncing your contacts. Your contacts are hashed locally and never stored.")
+                    }
+                }
+
+                // Section 2: Similar Taste
+                Section {
+                    if viewModel.isLoadingTaste {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
+                        }
+                    } else if viewModel.tasteSuggestions.isEmpty {
+                        Text("Rate some books to get taste-based suggestions.")
+                            .foregroundStyle(.secondary)
+                            .font(.callout)
+                    } else {
+                        ForEach(viewModel.tasteSuggestions) { user in
+                            DiscoverUserRow(
+                                user: user,
+                                isFollowed: followedUserIDs.contains(user.id),
+                                onFollow: {
+                                    Task {
+                                        followedUserIDs.insert(user.id)
+                                        await viewModel.followUser(id: user.id)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                } header: {
+                    Text("Similar Taste")
+                }
+
+                // Section 3: Popular on Shelf
+                Section {
+                    if viewModel.isLoadingPopular {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
+                        }
+                    } else if viewModel.popularUsers.isEmpty {
+                        Text("No popular users found.")
+                            .foregroundStyle(.secondary)
+                            .font(.callout)
+                    } else {
+                        ForEach(viewModel.popularUsers) { user in
+                            DiscoverUserRow(
+                                user: user,
+                                isFollowed: followedUserIDs.contains(user.id),
+                                onFollow: {
+                                    Task {
+                                        followedUserIDs.insert(user.id)
+                                        await viewModel.followUser(id: user.id)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                } header: {
+                    Text("Popular on Shelf")
+                }
+            }
+            .navigationTitle("Find Friends")
+            .toolbar {
+                if isOnboarding {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Skip") {
+                            onDismiss?()
+                        }
+                    }
+                }
+            }
+            .task {
+                await viewModel.loadTasteSuggestions()
+                await viewModel.loadPopularUsers()
+            }
+        }
+    }
+}
+
+
+struct DiscoverUserRow: View {
+    let user: DiscoverUser
+    let isFollowed: Bool
+    let onFollow: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Avatar
+            AsyncImage(url: user.avatarURL.flatMap { URL(string: $0) }) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+            } placeholder: {
+                Image(systemName: "person.circle.fill")
+                    .resizable()
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 44, height: 44)
+            .clipShape(Circle())
+
+            // User info
+            VStack(alignment: .leading, spacing: 2) {
+                Text(user.displayName ?? user.username)
+                    .font(.body)
+                    .fontWeight(.medium)
+
+                Text("@\(user.username)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            // Taste match badge
+            if let score = user.tasteMatchScore {
+                let percentage = Int(truncating: score as NSDecimalNumber) * 100
+                Text("\(percentage)%")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.green.opacity(0.1), in: Capsule())
+            }
+
+            // Follow button
+            if isFollowed {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(.green)
+                    .fontWeight(.semibold)
+            } else {
+                Button("Follow") {
+                    onFollow()
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+```
+
+================================================================================
+Integration with Onboarding Flow
+================================================================================
+
+FindFriendsView is shown during onboarding after the import step completes (or
+if the user skips import). It should be the final step before landing on the
+main ContentView.
+
+Option A: Multi-step NavigationStack onboarding (recommended):
+
+The onboarding flow is a NavigationStack with steps. After the import step,
+navigate to FindFriendsView as the last onboarding page.
+
+```swift
+// In OnboardingView or the view managing onboarding state:
+
+struct OnboardingView: View {
+    @State private var currentStep: OnboardingStep = .welcome
+
+    enum OnboardingStep {
+        case welcome
+        case importBooks
+        case findFriends
+    }
+
+    var body: some View {
+        NavigationStack {
+            switch currentStep {
+            case .welcome:
+                WelcomeView(onContinue: { currentStep = .importBooks })
+
+            case .importBooks:
+                ImportView(
+                    onComplete: { currentStep = .findFriends },
+                    onSkip: { currentStep = .findFriends }
+                )
+
+            case .findFriends:
+                FindFriendsView(
+                    isOnboarding: true,
+                    onDismiss: { completeOnboarding() }
+                )
+            }
+        }
+    }
+
+    private func completeOnboarding() {
+        // Set UserDefaults flag, navigate to ContentView
+        UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+        // Trigger navigation to main app (via @AppStorage or similar)
+    }
+}
+```
+
+Option B: fullScreenCover presentation:
+
+```swift
+// After import completes or is skipped, present FindFriendsView:
+
+.fullScreenCover(isPresented: $showFindFriends) {
+    FindFriendsView(
+        isOnboarding: true,
+        onDismiss: {
+            showFindFriends = false
+            completeOnboarding()
+        }
+    )
+}
+```
+
+Also accessible from Settings for users who skipped onboarding or want to
+re-sync contacts later:
+
+```swift
+// In SettingsView, within a "Social" or "Account" section:
+
+Section("Social") {
+    NavigationLink {
+        FindFriendsView(isOnboarding: false)
+    } label: {
+        Label("Find Friends", systemImage: "person.2")
+    }
+}
+```
