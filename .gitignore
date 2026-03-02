@@ -18,3 +18,7 @@ Thumbs.db
 # Build
 dist/
 build/
+
+# Caches
+.pytest_cache/
+.ruff_cache/
