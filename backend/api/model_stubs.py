@@ -106,6 +106,9 @@ def _jsonb_col(**kwargs):
 
 
 def _fk_uuid_col(fk: str, **kwargs):
+    # Pop 'default' to prevent it from being interpreted as a literal column default.
+    # default=False was used to match _uuid_col's interface but FK columns don't need UUID auto-gen.
+    kwargs.pop("default", None)
     if TESTING:
         return mapped_column(StringUUID(), ForeignKey(fk), **kwargs)
     return mapped_column(PG_UUID(as_uuid=True), ForeignKey(fk), **kwargs)
@@ -201,6 +204,7 @@ class User(TimestampMixin, Base):
     favorite_books: Mapped[Optional[List[uuid.UUID]]] = _array_uuid_col(nullable=True)
     is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # --- User book domain ---
@@ -219,6 +223,7 @@ class UserBook(TimestampMixin, Base):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     is_imported: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_hidden: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped["User"] = relationship(lazy="selectin")
     work: Mapped["Work"] = relationship(lazy="selectin")
@@ -320,3 +325,100 @@ class ImportJob(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Content moderation domain ---
+# TODO: provided by backend/database — ReviewFlag model
+
+
+class ReviewFlag(TimestampMixin, Base):
+    __tablename__ = "review_flags"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    flagger_user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    user_book_id: Mapped[uuid.UUID] = _fk_uuid_col("user_books.id", index=True)
+    reason: Mapped[str] = mapped_column(String(20))
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    reviewed_by: Mapped[Optional[uuid.UUID]] = _fk_uuid_col(
+        "users.id", nullable=True, default=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Metadata reporting domain ---
+# TODO: provided by backend/database — MetadataReport model
+
+
+class MetadataReport(TimestampMixin, Base):
+    __tablename__ = "metadata_reports"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    reporter_user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    work_id: Mapped[uuid.UUID] = _fk_uuid_col("works.id", index=True)
+    issue_type: Mapped[str] = mapped_column(String(30))
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="OPEN")
+    reviewed_by: Mapped[Optional[uuid.UUID]] = _fk_uuid_col(
+        "users.id", nullable=True, default=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Waitlist & invite codes domain ---
+# TODO: provided by backend/database — Waitlist and InviteCode models
+
+
+class Waitlist(TimestampMixin, Base):
+    __tablename__ = "waitlist"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    invited_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    invite_code_id: Mapped[Optional[uuid.UUID]] = _fk_uuid_col(
+        "invite_codes.id", nullable=True, default=False
+    )
+
+
+class InviteCode(TimestampMixin, Base):
+    __tablename__ = "invite_codes"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    code: Mapped[str] = mapped_column(String(12), unique=True, index=True)
+    created_by_user_id: Mapped[Optional[uuid.UUID]] = _fk_uuid_col(
+        "users.id", nullable=True, default=False
+    )
+    claimed_by_user_id: Mapped[Optional[uuid.UUID]] = _fk_uuid_col(
+        "users.id", nullable=True, default=False
+    )
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Data export domain ---
+# TODO: provided by backend/database — ExportRequest model
+
+
+class ExportRequest(TimestampMixin, Base):
+    __tablename__ = "export_requests"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Friend discovery domain ---
+# TODO: provided by backend/database — UserContactHash model
+
+
+class UserContactHash(TimestampMixin, Base):
+    __tablename__ = "user_contact_hashes"
+
+    id: Mapped[uuid.UUID] = _uuid_col(primary_key=True)
+    user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
+    hash: Mapped[str] = mapped_column(String(64))
+    hash_type: Mapped[str] = mapped_column(String(10))

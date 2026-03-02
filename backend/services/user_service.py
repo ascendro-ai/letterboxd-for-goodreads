@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from backend.api.errors import blocked_user, user_not_found
-from backend.api.model_stubs import Follow, User, UserBook
+from backend.api.model_stubs import (
+    Activity,
+    Block,
+    ExportRequest,
+    Follow,
+    InviteCode,
+    Mute,
+    Notification,
+    Shelf,
+    ShelfBook,
+    User,
+    UserBook,
+    UserContactHash,
+)
 from backend.api.pagination import apply_cursor_filter, encode_cursor
 from backend.api.schemas.common import PaginatedResponse
 from backend.api.schemas.users import UpdateProfileRequest, UserBrief, UserProfile
 from backend.services.social_service import is_blocked
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -82,6 +96,8 @@ async def update_profile(
     if user is None:
         raise user_not_found()
 
+    if request.username is not None:
+        user.username = request.username
     if request.display_name is not None:
         user.display_name = request.display_name
     if request.bio is not None:
@@ -136,16 +152,77 @@ async def search_users(
 
 
 async def soft_delete_account(db: AsyncSession, user_id: UUID) -> None:
-    """Soft delete: anonymize user data, mark as deleted."""
+    """Comprehensive GDPR-compliant account deletion with data anonymization.
+
+    Steps performed:
+      1. Mark user as deleted with timestamp
+      2. Anonymize profile (username, display_name, bio, avatar, favorites)
+      3. Delete all contact hashes (friend discovery)
+      4. Invalidate all invite codes created by user
+      5. Delete all follows (both directions)
+      6. Delete all blocks and mutes (both directions)
+      7. Keep reviews and ratings (they persist as "Deleted User")
+      8. Keep user_books records (ratings/reviews stay)
+      9. Delete all shelves and shelf_books
+     10. Delete all pending export requests
+     11. Delete all activities from feed
+     12. Clear all notification records
+    """
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if user is None:
         raise user_not_found()
 
+    now = datetime.now(timezone.utc)
+
+    # --- Step 1: Mark as deleted ---
     user.is_deleted = True
-    user.username = f"deleted_{str(user.id)[:8]}"
-    user.display_name = None
+    user.deleted_at = now
+
+    # --- Step 2: Anonymize profile ---
+    user.username = f"deleted_{str(user_id)[:8]}"
+    user.display_name = "Deleted User"
     user.bio = None
     user.avatar_url = None
-    user.favorite_books = None
+    user.favorite_books = []
+
+    # --- Step 3: Delete contact hashes (friend discovery) ---
+    await db.execute(delete(UserContactHash).where(UserContactHash.user_id == user_id))
+
+    # --- Step 4: Invalidate invite codes ---
+    await db.execute(
+        update(InviteCode).where(InviteCode.created_by_user_id == user_id).values(expires_at=now)
+    )
+
+    # --- Step 5: Delete all follows (both directions) ---
+    await db.execute(
+        delete(Follow).where(or_(Follow.follower_id == user_id, Follow.following_id == user_id))
+    )
+
+    # --- Step 6: Delete all blocks and mutes (both directions) ---
+    await db.execute(
+        delete(Block).where(or_(Block.blocker_id == user_id, Block.blocked_id == user_id))
+    )
+    await db.execute(delete(Mute).where(or_(Mute.muter_id == user_id, Mute.muted_id == user_id)))
+
+    # --- Steps 7-8: Keep reviews and user_books (no action needed) ---
+
+    # --- Step 9: Delete all shelves and shelf_books ---
+    shelf_ids_result = await db.execute(select(Shelf.id).where(Shelf.user_id == user_id))
+    shelf_ids = [row[0] for row in shelf_ids_result.all()]
+
+    if shelf_ids:
+        await db.execute(delete(ShelfBook).where(ShelfBook.shelf_id.in_(shelf_ids)))
+        await db.execute(delete(Shelf).where(Shelf.user_id == user_id))
+
+    # --- Step 10: Delete pending export requests ---
+    await db.execute(delete(ExportRequest).where(ExportRequest.user_id == user_id))
+
+    # --- Step 11: Delete all activities from feed ---
+    await db.execute(delete(Activity).where(Activity.user_id == user_id))
+
+    # --- Step 12: Clear notification records ---
+    await db.execute(delete(Notification).where(Notification.user_id == user_id))
+    await db.execute(delete(Notification).where(Notification.actor_id == user_id))
+
     await db.flush()

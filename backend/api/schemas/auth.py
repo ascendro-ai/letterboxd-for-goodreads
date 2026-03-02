@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 __all__ = [
     "AuthResponse",
+    "DeleteAccountRequest",
     "LoginRequest",
     "OAuthTokenRequest",
     "RefreshRequest",
@@ -33,3 +34,12 @@ class AuthResponse(BaseModel):
     refresh_token: str
     user_id: str
     username: str
+
+
+class DeleteAccountRequest(BaseModel):
+    """Request body for account deletion. Requires explicit confirmation."""
+
+    confirm: bool = Field(
+        ...,
+        description="Must be true to confirm account deletion.",
+    )

@@ -15,8 +15,9 @@ from backend.api.model_stubs import (
 from backend.api.pagination import apply_cursor_filter, encode_cursor
 from backend.api.schemas.books import AuthorBrief, BookBrief
 from backend.api.schemas.common import PaginatedResponse
-from backend.api.schemas.feed import FeedItem, NotificationItem
+from backend.api.schemas.feed import FeedItem, FeedResponse, NotificationItem
 from backend.api.schemas.users import UserBrief
+from backend.services.popular_service import get_popular_feed_items
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,15 +27,27 @@ async def get_feed(
     user_id: UUID,
     cursor: str | None,
     limit: int,
-) -> PaginatedResponse[FeedItem]:
+) -> FeedResponse:
     """Get activity feed. Falls back to popular feed if user has no follows."""
-    # Check if user has any follows
     follow_count = await db.scalar(select(func.count()).where(Follow.follower_id == user_id))
 
     if not follow_count:
-        return await _get_popular_feed(db, cursor, limit)
+        return await get_popular_feed_items(db, cursor, limit)
 
-    return await _get_following_feed(db, user_id, cursor, limit)
+    following_feed = await _get_following_feed(db, user_id, cursor, limit)
+
+    # If the user follows people but the feed is empty (e.g. new follows, no
+    # activity yet), mix in popular items
+    if not following_feed.items and cursor is None:
+        popular = await get_popular_feed_items(db, cursor, limit)
+        return FeedResponse(
+            items=popular.items,
+            next_cursor=popular.next_cursor,
+            has_more=popular.has_more,
+            feed_type="mixed",
+        )
+
+    return following_feed
 
 
 async def _get_following_feed(
@@ -42,7 +55,7 @@ async def _get_following_feed(
     user_id: UUID,
     cursor: str | None,
     limit: int,
-) -> PaginatedResponse[FeedItem]:
+) -> FeedResponse:
     """Fan-out-on-read: activities from followed users, excluding muted/blocked."""
     following_ids = select(Follow.following_id).where(Follow.follower_id == user_id)
     blocked_ids = select(Block.blocked_id).where(Block.blocker_id == user_id)
@@ -70,31 +83,13 @@ async def _get_following_feed(
     if has_more:
         activities = activities[:limit]
 
-    return await _activities_to_feed(db, activities, has_more)
-
-
-async def _get_popular_feed(
-    db: AsyncSession,
-    cursor: str | None,
-    limit: int,
-) -> PaginatedResponse[FeedItem]:
-    """Cold start feed: recent high-rated activities globally."""
-    stmt = (
-        select(Activity)
-        .where(Activity.activity_type == "finished_book")
-        .order_by(Activity.created_at.desc(), Activity.id.desc())
+    feed = await _activities_to_feed(db, activities, has_more)
+    return FeedResponse(
+        items=feed.items,
+        next_cursor=feed.next_cursor,
+        has_more=feed.has_more,
+        feed_type="following",
     )
-    stmt = apply_cursor_filter(stmt, Activity, cursor)
-    stmt = stmt.limit(limit + 1)
-
-    result = await db.execute(stmt)
-    activities = list(result.scalars().all())
-
-    has_more = len(activities) > limit
-    if has_more:
-        activities = activities[:limit]
-
-    return await _activities_to_feed(db, activities, has_more)
 
 
 async def _activities_to_feed(

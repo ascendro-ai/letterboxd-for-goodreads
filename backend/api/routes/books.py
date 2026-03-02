@@ -5,9 +5,10 @@ from uuid import UUID
 from backend.api.deps import DB, CurrentUser
 from backend.api.schemas.books import BookDetail, BookSearchResult
 from backend.api.schemas.common import PaginatedResponse
+from backend.api.schemas.report import ReportIssueRequest, ReportIssueResponse
 from backend.api.schemas.user_books import UserBookResponse
-from backend.services import book_service
-from fastapi import APIRouter, Query
+from backend.services import book_service, report_service
+from fastapi import APIRouter, Query, status
 
 router = APIRouter()
 
@@ -76,3 +77,30 @@ async def get_similar_books(
 ) -> list[BookDetail]:
     """Get books similar to this one (collaborative filtering)."""
     return await book_service.get_similar_books(db, work_id, limit)
+
+
+@router.post(
+    "/{work_id}/report",
+    response_model=ReportIssueResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def report_metadata_issue(
+    work_id: UUID,
+    request: ReportIssueRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> ReportIssueResponse:
+    """Report a metadata issue on a book (wrong cover, author, title, etc.)."""
+    report = await report_service.report_issue(
+        db,
+        user_id=current_user.id,
+        work_id=work_id,
+        issue_type=request.issue_type.value,
+        description=request.description,
+    )
+    return ReportIssueResponse(
+        id=report.id,
+        issue_type=request.issue_type,
+        status=report.status,
+        created_at=report.created_at,
+    )
