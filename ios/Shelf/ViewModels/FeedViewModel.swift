@@ -3,13 +3,16 @@ import Foundation
 @Observable
 final class FeedViewModel {
     private(set) var items: [FeedItem] = []
+    private(set) var popularBooks: [Book] = []
     private(set) var isLoading = false
     private(set) var isLoadingMore = false
     private(set) var error: Error?
+    private(set) var showingPopular = false
     private var nextCursor: String?
     private var hasMore = true
 
     private let feedService = FeedService.shared
+    private let bookService = BookService.shared
 
     @MainActor
     func loadFeed() async {
@@ -22,6 +25,13 @@ final class FeedViewModel {
             items = response.items
             nextCursor = response.nextCursor
             hasMore = response.hasMore
+
+            // Cold start: if feed is empty, show popular books
+            if items.isEmpty {
+                await loadPopular()
+            } else {
+                showingPopular = false
+            }
         } catch {
             self.error = error
         }
@@ -51,5 +61,15 @@ final class FeedViewModel {
         nextCursor = nil
         hasMore = true
         await loadFeed()
+    }
+
+    @MainActor
+    private func loadPopular() async {
+        do {
+            popularBooks = try await bookService.getPopular()
+            showingPopular = true
+        } catch {
+            // No popular books available — keep empty state
+        }
     }
 }

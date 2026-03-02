@@ -15,6 +15,9 @@ struct ShelfApp: App {
         WindowGroup {
             RootView()
                 .environment(authService)
+                .onOpenURL { url in
+                    DeepLinkRouter.shared.handle(url: url)
+                }
                 .task {
                     await authService.restoreSession()
 
@@ -97,7 +100,7 @@ struct RootView: View {
 struct LaunchScreen: View {
     var body: some View {
         ZStack {
-            Color(.systemBackground)
+            Color.shelfBackground
                 .ignoresSafeArea()
             VStack(spacing: 12) {
                 Image(systemName: "books.vertical.fill")
@@ -105,6 +108,7 @@ struct LaunchScreen: View {
                     .foregroundStyle(Color.accentColor)
                 Text("Shelf")
                     .font(.title.bold())
+                    .foregroundStyle(Color.textPrimary)
             }
         }
     }

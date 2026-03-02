@@ -23,6 +23,15 @@ struct SpoilerText: View {
             .padding()
             .background(Color(.systemGray6))
             .clipShape(RoundedRectangle(cornerRadius: 10))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Review hidden — contains spoilers")
+            .accessibilityHint("Double tap to reveal spoiler text")
+            .accessibilityAddTraits(.isButton)
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isRevealed = true
+                }
+            }
         } else {
             Text(text)
                 .font(.body)

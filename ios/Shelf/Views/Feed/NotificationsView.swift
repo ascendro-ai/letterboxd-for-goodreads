@@ -48,6 +48,7 @@ struct NotificationsView: View {
                 Image(systemName: "bell.fill")
                     .font(.body)
                     .foregroundStyle(notification.isRead ? Color.secondary : Color.accentColor)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(notification.title)
@@ -63,6 +64,8 @@ struct NotificationsView: View {
                         .foregroundStyle(.tertiary)
                 }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(notification.isRead ? "" : "Unread. ")\(notification.title). \(notification.body)")
             .listRowBackground(notification.isRead ? Color.clear : Color.accentColor.opacity(0.05))
         }
         .listStyle(.plain)

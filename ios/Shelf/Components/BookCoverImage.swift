@@ -34,13 +34,14 @@ struct BookCoverImage: View {
 
     private var placeholder: some View {
         RoundedRectangle(cornerRadius: cornerRadius)
-            .fill(Color(.systemGray5))
+            .fill(Color.coverPlaceholder)
             .frame(width: size.width, height: size.height)
             .overlay {
                 Image(systemName: "book.closed.fill")
                     .foregroundStyle(.quaternary)
                     .font(.system(size: size.width * 0.3))
             }
+            .accessibilityHidden(true)
     }
 }
 

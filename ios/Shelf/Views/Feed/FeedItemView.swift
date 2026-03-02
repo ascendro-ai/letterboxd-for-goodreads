@@ -56,5 +56,7 @@ struct FeedItemView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.user.username) \(item.activityType.displayText) \(item.book.title)")
     }
 }

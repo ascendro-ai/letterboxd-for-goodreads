@@ -51,6 +51,12 @@ struct SettingsView: View {
                 } label: {
                     Label("Import Library", systemImage: "square.and.arrow.down")
                 }
+
+                NavigationLink {
+                    ContactsSyncView()
+                } label: {
+                    Label("Find Friends from Contacts", systemImage: "person.crop.rectangle.stack")
+                }
             }
 
             Section("Data") {

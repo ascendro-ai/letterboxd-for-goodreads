@@ -33,12 +33,22 @@ struct SearchView: View {
             BookDetailView(bookID: book.id)
         }
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                NavigationLink {
+                    UserSearchView()
+                } label: {
+                    Image(systemName: "person.magnifyingglass")
+                }
+                .accessibilityLabel("Search people")
+            }
+
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showScanner = true
                 } label: {
                     Image(systemName: "barcode.viewfinder")
                 }
+                .accessibilityLabel("Scan barcode")
             }
         }
         .sheet(isPresented: $showScanner) {

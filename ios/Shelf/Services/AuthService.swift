@@ -57,8 +57,8 @@ final class AuthService {
 
     // MARK: - Email + Password
 
-    func signUp(email: String, password: String, username: String) async throws {
-        let request = SignupRequest(email: email, password: password, username: username)
+    func signUp(email: String, password: String, username: String, inviteCode: String? = nil) async throws {
+        let request = SignupRequest(email: email, password: password, username: username, inviteCode: inviteCode)
         let response: AuthResponse = try await api.request(.post, path: "/auth/signup", body: request)
         handleAuthResponse(response)
     }

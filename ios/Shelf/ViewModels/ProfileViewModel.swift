@@ -8,10 +8,13 @@ final class ProfileViewModel {
     private(set) var isLoading = false
     private(set) var error: Error?
     private(set) var selectedStatus: ReadingStatus? = nil
+    private(set) var isOffline = false
 
     private let socialService = SocialService.shared
     private let userBookService = UserBookService.shared
     private let shelfService = ShelfService.shared
+    private let offlineStore = OfflineStore.shared
+    private let syncService = SyncService.shared
 
     let userID: UUID?  // nil = current user
 
@@ -26,6 +29,7 @@ final class ProfileViewModel {
         guard !isLoading else { return }
         isLoading = true
         error = nil
+        isOffline = !syncService.isOnline
 
         do {
             if let userID {
@@ -37,6 +41,9 @@ final class ProfileViewModel {
                 profile = p
                 books = b.items
                 shelves = s
+
+                // Cache books for offline
+                offlineStore.cacheUserBooks(b.items)
             } else {
                 async let userResult = socialService.getMyProfile()
                 async let booksResult = userBookService.getMyBooks()
@@ -54,6 +61,9 @@ final class ProfileViewModel {
                 )
                 books = b.items
                 shelves = s
+
+                // Cache own books for offline
+                offlineStore.cacheUserBooks(b.items)
             }
         } catch {
             self.error = error

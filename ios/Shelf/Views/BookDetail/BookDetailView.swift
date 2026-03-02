@@ -74,6 +74,7 @@ struct BookDetailView: View {
                 // Hero cover
                 HeroBookCover(url: book.coverImageURL)
                     .padding(.top, 8)
+                    .accessibilityLabel("Cover of \(book.title)")
 
                 // Title & Authors
                 VStack(spacing: 6) {
@@ -94,6 +95,7 @@ struct BookDetailView: View {
                     }
                 }
                 .padding(.horizontal)
+                .accessibilityElement(children: .combine)
 
                 // Rating summary
                 if let rating = book.averageRating {
@@ -105,6 +107,8 @@ struct BookDetailView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(String(format: "%.1f", rating)) average from \(book.ratingsCount) ratings")
                 }
 
                 // Action button

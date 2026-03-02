@@ -40,6 +40,9 @@ struct BookCard: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(book.title) by \(book.authors.first?.name ?? "Unknown author")")
+        .accessibilityValue(book.averageRating.map { "Rated \(String(format: "%.1f", $0)) stars" } ?? "")
     }
 }
 

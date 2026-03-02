@@ -6,12 +6,14 @@ struct FeedView: View {
 
     var body: some View {
         Group {
-            if viewModel.isLoading && viewModel.items.isEmpty {
+            if viewModel.isLoading && viewModel.items.isEmpty && viewModel.popularBooks.isEmpty {
                 LoadingStateView()
-            } else if let error = viewModel.error, viewModel.items.isEmpty {
+            } else if let error = viewModel.error, viewModel.items.isEmpty, viewModel.popularBooks.isEmpty {
                 ErrorStateView(error: error) {
                     Task { await viewModel.refresh() }
                 }
+            } else if viewModel.showingPopular {
+                popularFeed
             } else if viewModel.items.isEmpty {
                 EmptyStateView(
                     icon: "newspaper",
@@ -32,6 +34,43 @@ struct FeedView: View {
             await viewModel.refresh()
         }
     }
+
+    // MARK: - Popular Books (Cold Start)
+
+    private var popularFeed: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                Text("Popular This Week")
+                    .font(.headline)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+
+                Text("Follow readers to build your personal feed.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+                    .padding(.bottom, 16)
+
+                ForEach(viewModel.popularBooks) { book in
+                    NavigationLink(value: book) {
+                        BookCard(book: book, size: .large)
+                            .padding(.horizontal)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider()
+                        .padding(.horizontal)
+                }
+            }
+        }
+        .navigationDestination(for: Book.self) { book in
+            BookDetailView(bookID: book.id)
+        }
+    }
+
+    // MARK: - Activity Feed
 
     private var feedList: some View {
         ScrollView {

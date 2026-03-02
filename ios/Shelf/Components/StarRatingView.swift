@@ -7,7 +7,7 @@ struct StarRatingView: View {
     var maxRating: Int = 5
     var size: CGFloat = 32
     var spacing: CGFloat = 4
-    var color: Color = .yellow
+    var color: Color = Color.starGold
 
     var body: some View {
         HStack(spacing: spacing) {
@@ -15,6 +15,8 @@ struct StarRatingView: View {
                 starImage(for: star)
                     .font(.system(size: size))
                     .foregroundStyle(color)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
                     .onTapGesture {
                         handleTap(star: star)
                     }
@@ -29,6 +31,7 @@ struct StarRatingView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Rating: \(formattedRating) out of \(maxRating) stars")
         .accessibilityValue(formattedRating)
+        .accessibilityHint("Swipe up or down to adjust rating by half a star")
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment:
@@ -89,7 +92,7 @@ struct StarRatingDisplay: View {
     var maxRating: Int = 5
     var size: CGFloat = 14
     var spacing: CGFloat = 1
-    var color: Color = .yellow
+    var color: Color = Color.starGold
 
     var body: some View {
         HStack(spacing: spacing) {
@@ -99,6 +102,7 @@ struct StarRatingDisplay: View {
                     .foregroundStyle(color)
             }
         }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Rated \(formattedRating) out of \(maxRating) stars")
     }
 

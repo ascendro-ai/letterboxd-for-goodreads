@@ -2,6 +2,9 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var selectedTab: Tab = .feed
+    @State private var searchNavigationPath = NavigationPath()
+
+    private let router = DeepLinkRouter.shared
 
     enum Tab: String, CaseIterable {
         case feed, search, log, notifications, profile
@@ -47,6 +50,24 @@ struct ContentView: View {
                     .tag(tab)
             }
         }
+        .onChange(of: router.selectedTab) { _, newTab in
+            if let newTab {
+                selectedTab = newTab
+                router.selectedTab = nil
+            }
+        }
+        .onChange(of: router.pendingDestination) { _, destination in
+            guard let destination else { return }
+            switch destination {
+            case .bookDetail(let id):
+                searchNavigationPath.append(BookNavigation.detail(id))
+            case .search:
+                break // Handled by SearchView observing the router
+            case .userProfile(let id):
+                searchNavigationPath.append(BookNavigation.userProfile(id))
+            }
+            router.pendingDestination = nil
+        }
     }
 
     @ViewBuilder
@@ -57,8 +78,16 @@ struct ContentView: View {
                 FeedView()
             }
         case .search:
-            NavigationStack {
+            NavigationStack(path: $searchNavigationPath) {
                 SearchView()
+                    .navigationDestination(for: BookNavigation.self) { nav in
+                        switch nav {
+                        case .detail(let id):
+                            BookDetailView(bookID: id)
+                        case .userProfile(let id):
+                            UserProfileView(userID: id)
+                        }
+                    }
             }
         case .log:
             NavigationStack {
@@ -74,4 +103,10 @@ struct ContentView: View {
             }
         }
     }
+}
+
+/// Navigation values for deep linking into the search tab's NavigationStack.
+enum BookNavigation: Hashable {
+    case detail(UUID)
+    case userProfile(UUID)
 }

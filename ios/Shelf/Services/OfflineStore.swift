@@ -120,6 +120,40 @@ final class OfflineStore {
         try? context.save()
     }
 
+    // MARK: - Retrieve Cached Books
+
+    @MainActor
+    func getCachedBook(id: UUID) -> CachedBook? {
+        let context = container.mainContext
+        let predicate = #Predicate<CachedBook> { $0.bookID == id }
+        var descriptor = FetchDescriptor<CachedBook>(predicate: predicate)
+        descriptor.fetchLimit = 1
+        return (try? context.fetch(descriptor))?.first
+    }
+
+    @MainActor
+    func getCachedUserBooks() -> [CachedUserBook] {
+        let context = container.mainContext
+        let descriptor = FetchDescriptor<CachedUserBook>(sortBy: [SortDescriptor(\.cachedAt, order: .reverse)])
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    @MainActor
+    func cacheUserBook(_ userBook: UserBook) {
+        let context = container.mainContext
+        context.insert(CachedUserBook(from: userBook))
+        try? context.save()
+    }
+
+    @MainActor
+    func cacheUserBooks(_ userBooks: [UserBook]) {
+        let context = container.mainContext
+        for ub in userBooks {
+            context.insert(CachedUserBook(from: ub))
+        }
+        try? context.save()
+    }
+
     // MARK: - Queue Offline Actions
 
     @MainActor

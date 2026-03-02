@@ -36,6 +36,27 @@ struct AuthView: View {
                     .signInWithAppleButtonStyle(.whiteOutline)
                     .frame(height: 50)
 
+                    // Google Sign In
+                    Button {
+                        signInWithGoogle()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "g.circle.fill")
+                                .font(.title3)
+                            Text("Sign in with Google")
+                                .fontWeight(.medium)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                        .background(Color(.systemBackground))
+                        .foregroundStyle(Color(.label))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color(.systemGray3), lineWidth: 1)
+                        )
+                    }
+
                     Button {
                         showSignUp = true
                     } label: {
@@ -77,5 +98,13 @@ struct AuthView: View {
         case .failure:
             break
         }
+    }
+
+    private func signInWithGoogle() {
+        // TODO: Integrate Google Sign In SDK (GoogleSignIn-iOS)
+        // 1. Add GoogleService-Info.plist to project
+        // 2. Add GoogleSignIn SPM dependency
+        // 3. Call GIDSignIn.sharedInstance.signIn(withPresenting:) to get idToken
+        // 4. Pass idToken to AuthService.shared.signInWithGoogle(idToken:)
     }
 }

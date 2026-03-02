@@ -2,9 +2,10 @@ import SwiftUI
 
 struct MyProfileView: View {
     @State private var viewModel = ProfileViewModel()
+    @Namespace private var coverNamespace
 
     var body: some View {
-        ProfileContentView(viewModel: viewModel)
+        ProfileContentView(viewModel: viewModel, coverNamespace: coverNamespace)
             .navigationTitle("Profile")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -13,6 +14,7 @@ struct MyProfileView: View {
                     } label: {
                         Image(systemName: "gearshape")
                     }
+                    .accessibilityLabel("Settings")
                 }
             }
     }
@@ -21,6 +23,7 @@ struct MyProfileView: View {
 struct UserProfileView: View {
     let userID: UUID
     @State private var viewModel: ProfileViewModel
+    @Namespace private var coverNamespace
 
     init(userID: UUID) {
         self.userID = userID
@@ -28,12 +31,14 @@ struct UserProfileView: View {
     }
 
     var body: some View {
-        ProfileContentView(viewModel: viewModel)
+        ProfileContentView(viewModel: viewModel, coverNamespace: coverNamespace)
     }
 }
 
 struct ProfileContentView: View {
     @Bindable var viewModel: ProfileViewModel
+    var coverNamespace: Namespace.ID
+    @State private var displayMode: ProfileDisplayMode = .grid
 
     var body: some View {
         Group {
@@ -61,6 +66,7 @@ struct ProfileContentView: View {
                 // Avatar + name
                 VStack(spacing: 10) {
                     UserAvatarView(url: profile.user.avatarURL, size: 80)
+                        .accessibilityHidden(true)
 
                     VStack(spacing: 4) {
                         if let displayName = profile.user.displayName {
@@ -71,6 +77,7 @@ struct ProfileContentView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityElement(children: .combine)
 
                     if let bio = profile.user.bio, !bio.isEmpty {
                         Text(bio)
@@ -99,6 +106,7 @@ struct ProfileContentView: View {
                             .foregroundStyle(profile.isFollowing == true ? Color.primary : Color.white)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
+                    .accessibilityLabel(profile.isFollowing == true ? "Unfollow \(profile.user.username)" : "Follow \(profile.user.username)")
                 }
 
                 // Favorite books
@@ -108,7 +116,6 @@ struct ProfileContentView: View {
                             .font(.headline)
                             .padding(.horizontal)
 
-                        // TODO: Fetch book details for favorite UUIDs
                         Text("\(favorites.count) favorites selected")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -117,46 +124,52 @@ struct ProfileContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                // Status filter
+                // Display mode toggle + status filter
                 VStack(alignment: .leading, spacing: 12) {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            StatusFilterChip(title: "All", isSelected: viewModel.selectedStatus == nil) {
-                                Task { await viewModel.filterBooks(by: nil) }
-                            }
-                            ForEach(ReadingStatus.allCases, id: \.self) { status in
-                                StatusFilterChip(
-                                    title: status.displayName,
-                                    isSelected: viewModel.selectedStatus == status
-                                ) {
-                                    Task { await viewModel.filterBooks(by: status) }
+                    HStack {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                StatusFilterChip(title: "All", isSelected: viewModel.selectedStatus == nil) {
+                                    Task { await viewModel.filterBooks(by: nil) }
+                                }
+                                ForEach(ReadingStatus.allCases, id: \.self) { status in
+                                    StatusFilterChip(
+                                        title: status.displayName,
+                                        isSelected: viewModel.selectedStatus == status
+                                    ) {
+                                        Task { await viewModel.filterBooks(by: status) }
+                                    }
                                 }
                             }
+                            .padding(.leading)
                         }
-                        .padding(.horizontal)
+
+                        // Grid/List toggle
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                displayMode = displayMode == .grid ? .list : .grid
+                            }
+                        } label: {
+                            Image(systemName: displayMode == .grid ? "list.bullet" : "square.grid.3x3")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 44, height: 44)
+                        }
+                        .accessibilityLabel(displayMode == .grid ? "Switch to list view" : "Switch to grid view")
+                        .padding(.trailing, 8)
                     }
 
-                    // Books list
+                    // Books display
                     if viewModel.books.isEmpty {
                         Text("No books yet")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
                             .padding(.top, 20)
+                    } else if displayMode == .grid {
+                        coverGrid
                     } else {
-                        LazyVStack(spacing: 0) {
-                            ForEach(viewModel.books) { userBook in
-                                if let book = userBook.book {
-                                    NavigationLink(value: book) {
-                                        BookCard(book: book, size: .medium)
-                                            .padding(.horizontal)
-                                            .padding(.vertical, 8)
-                                    }
-                                    .buttonStyle(.plain)
-                                    Divider().padding(.horizontal)
-                                }
-                            }
-                        }
+                        booksList
                     }
                 }
 
@@ -205,6 +218,40 @@ struct ProfileContentView: View {
             BookDetailView(bookID: book.id)
         }
     }
+
+    // MARK: - Cover Grid
+
+    private var coverGrid: some View {
+        let booksWithCovers = viewModel.books.compactMap(\.book)
+        return CoverGridView(books: booksWithCovers, columns: 3) { book in
+            // Navigation handled via NavigationLink path
+        }
+        .frame(minHeight: CGFloat(max(1, (booksWithCovers.count + 2) / 3)) * 180)
+    }
+
+    // MARK: - Books List
+
+    private var booksList: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(viewModel.books) { userBook in
+                if let book = userBook.book {
+                    NavigationLink(value: book) {
+                        BookCard(book: book, size: .medium)
+                            .padding(.horizontal)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                    Divider().padding(.horizontal)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Display Mode
+
+enum ProfileDisplayMode {
+    case grid, list
 }
 
 // MARK: - Helpers
@@ -221,6 +268,8 @@ struct StatColumn: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(value) \(label)")
     }
 }
 
@@ -239,5 +288,6 @@ struct StatusFilterChip: View {
                 .foregroundStyle(isSelected ? .white : .primary)
                 .clipShape(Capsule())
         }
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

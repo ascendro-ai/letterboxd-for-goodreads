@@ -132,8 +132,13 @@ private struct FollowStep: View {
     let onSkip: () -> Void
 
     @State private var suggestedUsers: [User] = []
+    @State private var contactMatches: [User] = []
     @State private var followedIDs: Set<UUID> = []
     @State private var isLoading = false
+    @State private var isSyncingContacts = false
+    @State private var hasTriedContacts = false
+
+    private let contactsService = ContactsService.shared
 
     var body: some View {
         VStack(spacing: 24) {
@@ -153,11 +158,36 @@ private struct FollowStep: View {
             }
             .padding(.top, 40)
 
-            if isLoading {
+            // Contacts sync button
+            if !hasTriedContacts {
+                Button {
+                    syncContacts()
+                } label: {
+                    HStack(spacing: 8) {
+                        if isSyncingContacts {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "person.crop.rectangle.stack")
+                        }
+                        Text("Find Friends from Contacts")
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .background(Color(.systemGray5))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .disabled(isSyncingContacts)
+                .padding(.horizontal, 24)
+            }
+
+            // User list
+            if isLoading && allUsers.isEmpty {
                 Spacer()
                 ProgressView()
                 Spacer()
-            } else if suggestedUsers.isEmpty {
+            } else if allUsers.isEmpty {
                 Spacer()
                 Text("Suggestions will appear after you import or rate some books.")
                     .font(.subheadline)
@@ -168,6 +198,34 @@ private struct FollowStep: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        if !contactMatches.isEmpty {
+                            Text("From Your Contacts")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal)
+                                .padding(.top, 8)
+                        }
+
+                        ForEach(contactMatches) { user in
+                            SuggestedUserRow(
+                                user: user,
+                                isFollowed: followedIDs.contains(user.id)
+                            ) {
+                                toggleFollow(user)
+                            }
+                            Divider().padding(.horizontal)
+                        }
+
+                        if !suggestedUsers.isEmpty {
+                            Text("Suggested for You")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal)
+                                .padding(.top, 8)
+                        }
+
                         ForEach(suggestedUsers) { user in
                             SuggestedUserRow(
                                 user: user,
@@ -194,7 +252,7 @@ private struct FollowStep: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
 
-                if !suggestedUsers.isEmpty {
+                if !allUsers.isEmpty {
                     Button("Skip", action: onSkip)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -208,6 +266,10 @@ private struct FollowStep: View {
         }
     }
 
+    private var allUsers: [User] {
+        contactMatches + suggestedUsers
+    }
+
     private func loadSuggestions() async {
         isLoading = true
         do {
@@ -217,6 +279,25 @@ private struct FollowStep: View {
             // No suggestions available — that's fine
         }
         isLoading = false
+    }
+
+    private func syncContacts() {
+        Task {
+            isSyncingContacts = true
+            let granted = await contactsService.requestAccess()
+            if granted {
+                do {
+                    let matched = try await contactsService.syncContacts()
+                    // Filter out anyone already in suggestions
+                    let suggestedIDs = Set(suggestedUsers.map(\.id))
+                    contactMatches = matched.filter { !suggestedIDs.contains($0.id) }
+                } catch {
+                    // Contacts sync failed — continue without
+                }
+            }
+            hasTriedContacts = true
+            isSyncingContacts = false
+        }
     }
 
     private func toggleFollow(_ user: User) {

@@ -31,6 +31,12 @@ struct SignupRequest: Codable {
     let email: String
     let password: String
     let username: String
+    let inviteCode: String?
+
+    enum CodingKeys: String, CodingKey {
+        case email, password, username
+        case inviteCode = "invite_code"
+    }
 }
 
 struct LoginRequest: Codable {

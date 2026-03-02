@@ -32,5 +32,6 @@ struct UserAvatarView: View {
                     .foregroundStyle(.secondary)
                     .font(.system(size: size * 0.4))
             }
+            .accessibilityHidden(true)
     }
 }

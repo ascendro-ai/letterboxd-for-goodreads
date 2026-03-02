@@ -112,6 +112,14 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shelf.app.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Shelf.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Shelf"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+    info:
+      path: ../ShelfTests/ShelfTests-Info.plist
+      properties:
+        CFBundleExecutable: ShelfTests
+        CFBundleIdentifier: com.shelf.app.tests
+        CFBundlePackageType: BNDL
 
 packages:
   Supabase:

@@ -7,6 +7,7 @@ struct ShelfDetailView: View {
     @State private var books: [UserBook] = []
     @State private var isLoading = false
     @State private var error: Error?
+    @State private var displayMode: ProfileDisplayMode = .list
 
     private let shelfService = ShelfService.shared
 
@@ -25,24 +26,43 @@ struct ShelfDetailView: View {
                     message: "No books on this shelf yet."
                 )
             } else {
-                booksList
+                booksContent
             }
         }
         .navigationTitle(shelf.name)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        displayMode = displayMode == .grid ? .list : .grid
+                    }
+                } label: {
+                    Image(systemName: displayMode == .grid ? "list.bullet" : "square.grid.3x3")
+                }
+                .accessibilityLabel(displayMode == .grid ? "Switch to list view" : "Switch to grid view")
+            }
+        }
         .task { await load() }
     }
 
-    private var booksList: some View {
-        List(books) { userBook in
-            if let book = userBook.book {
-                NavigationLink(value: book) {
-                    BookCard(book: book, size: .medium)
+    @ViewBuilder
+    private var booksContent: some View {
+        let booksWithCovers = books.compactMap(\.book)
+
+        if displayMode == .grid {
+            ScrollView {
+                CoverGridView(books: booksWithCovers, columns: 3) { _ in }
+                    .frame(minHeight: CGFloat(max(1, (booksWithCovers.count + 2) / 3)) * 180)
+            }
+        } else {
+            List(books) { userBook in
+                if let book = userBook.book {
+                    NavigationLink(value: book) {
+                        BookCard(book: book, size: .medium)
+                    }
                 }
             }
-        }
-        .listStyle(.plain)
-        .navigationDestination(for: Book.self) { book in
-            BookDetailView(bookID: book.id)
+            .listStyle(.plain)
         }
     }
 
