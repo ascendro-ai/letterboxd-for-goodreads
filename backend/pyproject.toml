@@ -8,7 +8,9 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
+# UP017 (datetime.UTC) and UP042 (StrEnum) require Python 3.11+ but test venv is 3.9
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["UP017", "UP042"]
 
 [tool.ruff.lint.per-file-ignores]
 # model_stubs.py uses Optional/List for Python 3.9 SQLAlchemy compat (Mapped[] evaluated at runtime)

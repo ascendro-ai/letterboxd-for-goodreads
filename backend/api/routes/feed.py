@@ -4,20 +4,20 @@ from __future__ import annotations
 
 from backend.api.deps import DB, CurrentUser
 from backend.api.schemas.common import PaginatedResponse
-from backend.api.schemas.feed import FeedItem, MarkReadRequest, NotificationItem
+from backend.api.schemas.feed import FeedResponse, MarkReadRequest, NotificationItem
 from backend.services import feed_service
 from fastapi import APIRouter, Query
 
 router = APIRouter()
 
 
-@router.get("/feed", response_model=PaginatedResponse[FeedItem])
+@router.get("/feed", response_model=FeedResponse)
 async def get_feed(
     db: DB,
     current_user: CurrentUser,
     cursor: str | None = None,
     limit: int = Query(20, ge=1, le=100),
-) -> PaginatedResponse[FeedItem]:
+) -> FeedResponse:
     """Get activity feed. Returns popular feed for users with no follows (cold start)."""
     return await feed_service.get_feed(db, current_user.id, cursor, limit)
 

@@ -17,7 +17,7 @@ from backend.api.pagination import apply_cursor_filter, encode_cursor
 from backend.api.schemas.books import AuthorBrief, BookDetail, BookSearchResult
 from backend.api.schemas.common import PaginatedResponse
 from backend.api.schemas.user_books import UserBookResponse
-from backend.api.utils import build_bookshop_url
+from backend.services.affiliate_service import generate_bookshop_url, get_best_isbn_for_work
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,7 +74,8 @@ async def get_book_detail(db: AsyncSession, work_id: UUID) -> BookDetail:
     editions_count = editions_count_result.scalar() or 0
 
     settings = get_settings()
-    bookshop_url = build_bookshop_url(work.title, settings.bookshop_affiliate_id)
+    isbn = await get_best_isbn_for_work(db, work_id)
+    bookshop_url = generate_bookshop_url(isbn, work.title, settings.bookshop_affiliate_id)
 
     return BookDetail(
         id=work.id,
@@ -218,6 +219,7 @@ async def get_similar_books(db: AsyncSession, work_id: UUID, limit: int) -> list
     for row in rows:
         work = works_map.get(row.work_id)
         if work:
+            isbn = await get_best_isbn_for_work(db, work.id)
             similar.append(
                 BookDetail(
                     id=work.id,
@@ -230,7 +232,9 @@ async def get_similar_books(db: AsyncSession, work_id: UUID, limit: int) -> list
                     cover_image_url=work.cover_image_url,
                     average_rating=work.average_rating,
                     ratings_count=work.ratings_count,
-                    bookshop_url=build_bookshop_url(work.title, settings.bookshop_affiliate_id),
+                    bookshop_url=generate_bookshop_url(
+                        isbn, work.title, settings.bookshop_affiliate_id
+                    ),
                 )
             )
 
@@ -259,22 +263,24 @@ async def get_popular_books(
         works = works[:limit]
 
     settings = get_settings()
-    items = [
-        BookDetail(
-            id=w.id,
-            title=w.title,
-            original_title=w.original_title,
-            description=w.description,
-            first_published_year=w.first_published_year,
-            authors=[AuthorBrief(id=a.id, name=a.name) for a in (w.authors or [])],
-            subjects=w.subjects or [],
-            cover_image_url=w.cover_image_url,
-            average_rating=w.average_rating,
-            ratings_count=w.ratings_count,
-            bookshop_url=build_bookshop_url(w.title, settings.bookshop_affiliate_id),
+    items = []
+    for w in works:
+        isbn = await get_best_isbn_for_work(db, w.id)
+        items.append(
+            BookDetail(
+                id=w.id,
+                title=w.title,
+                original_title=w.original_title,
+                description=w.description,
+                first_published_year=w.first_published_year,
+                authors=[AuthorBrief(id=a.id, name=a.name) for a in (w.authors or [])],
+                subjects=w.subjects or [],
+                cover_image_url=w.cover_image_url,
+                average_rating=w.average_rating,
+                ratings_count=w.ratings_count,
+                bookshop_url=generate_bookshop_url(isbn, w.title, settings.bookshop_affiliate_id),
+            )
         )
-        for w in works
-    ]
 
     next_cursor = encode_cursor(works[-1].created_at, works[-1].id) if has_more else None
     return PaginatedResponse(items=items, next_cursor=next_cursor, has_more=has_more)

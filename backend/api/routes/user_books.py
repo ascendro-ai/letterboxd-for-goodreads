@@ -5,9 +5,11 @@ from __future__ import annotations
 from uuid import UUID
 
 from backend.api.deps import DB, CurrentUser
+from backend.api.errors import AppError
 from backend.api.schemas.common import PaginatedResponse
 from backend.api.schemas.user_books import LogBookRequest, UpdateBookRequest, UserBookResponse
 from backend.services import user_book_service
+from backend.services.moderation_service import check_review_content
 from fastapi import APIRouter, Query, status
 
 router = APIRouter()
@@ -20,6 +22,15 @@ async def log_book(
     current_user: CurrentUser,
 ) -> UserBookResponse:
     """Log a book: set status, rate, and review."""
+    # Run moderation check on review text before saving
+    if request.review_text:
+        moderation_result = await check_review_content(request.review_text)
+        if moderation_result.is_flagged:
+            raise AppError(
+                status_code=422,
+                code="REVIEW_FLAGGED",
+                message="Your review was flagged for potentially violating community guidelines.",
+            )
     return await user_book_service.log_book(db, current_user.id, request)
 
 
@@ -31,6 +42,15 @@ async def update_book(
     current_user: CurrentUser,
 ) -> UserBookResponse:
     """Update a logged book's status, rating, or review."""
+    # Run moderation check on review text before saving
+    if request.review_text:
+        moderation_result = await check_review_content(request.review_text)
+        if moderation_result.is_flagged:
+            raise AppError(
+                status_code=422,
+                code="REVIEW_FLAGGED",
+                message="Your review was flagged for potentially violating community guidelines.",
+            )
     return await user_book_service.update_book(db, current_user.id, user_book_id, request)
 
 

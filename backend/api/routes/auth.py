@@ -9,31 +9,73 @@
 import httpx
 from backend.api.config import get_settings
 from backend.api.deps import DB, CurrentUser
-from backend.api.errors import duplicate_username
-from backend.api.model_stubs import User
+from backend.api.errors import AppError, duplicate_username
+from backend.api.model_stubs import InviteCode, User
 from backend.api.schemas.auth import (
     AuthResponse,
+    DeleteAccountRequest,
     LoginRequest,
     OAuthTokenRequest,
     RefreshRequest,
-    SignupRequest,
 )
+from backend.api.schemas.waitlist import SignupWithInviteRequest
+from backend.services.invite_service import generate_codes_for_user, validate_and_claim_code
+from backend.services.observability import Events, track_event
+from backend.services.reserved_usernames import is_username_reserved, validate_username_format
+from backend.services.user_service import soft_delete_account
 from fastapi import APIRouter, HTTPException, status
+from sqlalchemy import select
 
 router = APIRouter()
 
 
 @router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-async def signup(request: SignupRequest, db: DB) -> AuthResponse:
-    """Create a new account via email+password. Also creates the User row in our DB."""
+async def signup(request: SignupWithInviteRequest, db: DB) -> AuthResponse:
+    """Create a new account via email+password with invite code. Also creates User row."""
     settings = get_settings()
 
-    # Check username uniqueness
-    from sqlalchemy import select
+    # Username format validation
+    format_error = validate_username_format(request.username)
+    if format_error is not None:
+        raise AppError(status_code=422, code="USERNAME_INVALID", message=format_error)
 
+    if is_username_reserved(request.username):
+        raise AppError(
+            status_code=422, code="USERNAME_RESERVED", message="This username is not available."
+        )
+
+    # Check username uniqueness
     existing = await db.execute(select(User).where(User.username == request.username))
     if existing.scalar_one_or_none() is not None:
         raise duplicate_username()
+
+    # Pre-validate invite code exists and is available
+    code_result = await db.execute(select(InviteCode).where(InviteCode.code == request.invite_code))
+    invite_code = code_result.scalar_one_or_none()
+
+    if invite_code is None:
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_INVALID",
+            message="This invite code is not valid.",
+        )
+
+    if invite_code.claimed_by_user_id is not None:
+        raise AppError(
+            status_code=422,
+            code="INVITE_CODE_CLAIMED",
+            message="This invite code has already been used.",
+        )
+
+    if invite_code.expires_at is not None:
+        from datetime import datetime, timezone
+
+        if invite_code.expires_at < datetime.now(timezone.utc):
+            raise AppError(
+                status_code=422,
+                code="INVITE_CODE_EXPIRED",
+                message="This invite code has expired.",
+            )
 
     # Create user in Supabase Auth
     async with httpx.AsyncClient() as client:
@@ -57,6 +99,12 @@ async def signup(request: SignupRequest, db: DB) -> AuthResponse:
     )
     db.add(user)
     await db.flush()
+
+    # Claim the invite code
+    await validate_and_claim_code(db=db, code=request.invite_code, user_id=user.id)
+
+    # Generate 5 invite codes for the new user
+    await generate_codes_for_user(db=db, user_id=user.id, count=5)
 
     return AuthResponse(
         access_token=data["access_token"],
@@ -88,8 +136,6 @@ async def login(request: LoginRequest, db: DB) -> AuthResponse:
         data = resp.json()
 
     # Look up username
-    from sqlalchemy import select
-
     result = await db.execute(select(User).where(User.id == data["user"]["id"]))
     user = result.scalar_one_or_none()
     username = user.username if user else ""
@@ -133,8 +179,6 @@ async def _oauth_exchange(id_token: str, provider: str, db: DB) -> AuthResponse:
         data = resp.json()
 
     # Check if user row exists, create if not
-    from sqlalchemy import select
-
     user_id = data["user"]["id"]
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -183,14 +227,30 @@ async def refresh(request: RefreshRequest) -> AuthResponse:
     )
 
 
-@router.delete("/account", status_code=status.HTTP_200_OK)
-async def delete_account(db: DB, current_user: CurrentUser) -> dict[str, str]:
-    """Soft delete: anonymize user data, mark as deleted."""
-    current_user.is_deleted = True
-    current_user.username = f"deleted_{str(current_user.id)[:8]}"
-    current_user.display_name = None
-    current_user.bio = None
-    current_user.avatar_url = None
-    current_user.favorite_books = None
-    await db.flush()
-    return {"message": "Account deleted"}
+@router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account(
+    request: DeleteAccountRequest,
+    db: DB,
+    current_user: CurrentUser,
+) -> None:
+    """GDPR-compliant account deletion with full data anonymization.
+
+    Requires {"confirm": true} in the request body. Anonymizes all personal
+    data, removes social connections, and preserves reviews under "Deleted User".
+    Returns 204 No Content on success.
+    """
+    if not request.confirm:
+        raise AppError(
+            status_code=422,
+            code="CONFIRMATION_REQUIRED",
+            message="You must set 'confirm' to true to delete your account.",
+        )
+
+    await soft_delete_account(db, current_user.id)
+    await db.commit()
+
+    track_event(
+        user_id=str(current_user.id),
+        event_name=Events.USER_DELETED_ACCOUNT,
+        properties={"username": current_user.username},
+    )

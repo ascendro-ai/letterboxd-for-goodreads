@@ -10,7 +10,7 @@ from backend.api.schemas.books import BookBrief
 from backend.api.schemas.users import UserBrief
 from pydantic import BaseModel
 
-__all__ = ["FeedItem", "MarkReadRequest", "NotificationItem"]
+__all__ = ["FeedItem", "FeedResponse", "MarkReadRequest", "NotificationItem"]
 
 
 class FeedItem(BaseModel):
@@ -22,6 +22,17 @@ class FeedItem(BaseModel):
     review_text: str | None = None
     has_spoilers: bool = False
     created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FeedResponse(BaseModel):
+    """Feed response with feed type metadata for cold start detection."""
+
+    items: list[FeedItem]
+    next_cursor: str | None = None
+    has_more: bool = False
+    feed_type: str = "following"
 
     model_config = {"from_attributes": True}
 

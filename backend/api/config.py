@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     cloudflare_r2_access_key: str = ""
     cloudflare_r2_secret_key: str = ""
     bookshop_affiliate_id: str = ""
+    openai_api_key: str = ""
+    posthog_api_key: str = ""
+    posthog_host: str = "https://app.posthog.com"
     environment: str = "development"
     default_page_limit: int = 20
     max_page_limit: int = 100  # hard cap to prevent expensive unbounded queries

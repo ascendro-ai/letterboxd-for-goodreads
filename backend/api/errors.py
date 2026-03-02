@@ -71,3 +71,23 @@ def duplicate_username() -> AppError:
 
 def self_action() -> AppError:
     return AppError(400, "SELF_ACTION", "You cannot perform this action on yourself.")
+
+
+def work_not_found() -> AppError:
+    return AppError(404, "WORK_NOT_FOUND", "No work found with the given ID.")
+
+
+def duplicate_report() -> AppError:
+    return AppError(
+        409,
+        "DUPLICATE_REPORT",
+        "You already have an open report for this issue on this book.",
+    )
+
+
+def report_rate_limited() -> AppError:
+    return AppError(
+        429,
+        "REPORT_RATE_LIMITED",
+        "You have reached the maximum number of reports per day. Please try again tomorrow.",
+    )

@@ -11,6 +11,7 @@ __all__ = ["UpdateProfileRequest", "UserBrief", "UserProfile"]
 
 
 class UpdateProfileRequest(BaseModel):
+    username: str | None = Field(None, min_length=3, max_length=20)
     display_name: str | None = Field(None, max_length=100)
     bio: str | None = Field(None, max_length=500)
     avatar_url: str | None = None
