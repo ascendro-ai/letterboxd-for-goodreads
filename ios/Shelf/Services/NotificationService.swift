@@ -1,3 +1,6 @@
+/// Handles push notification registration (APNs), permission requests,
+/// and routing incoming notifications to the correct destination view.
+
 import Foundation
 import UserNotifications
 import UIKit

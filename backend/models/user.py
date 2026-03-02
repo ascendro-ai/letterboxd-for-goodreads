@@ -1,3 +1,10 @@
+"""User account model.
+
+The id is supplied by Supabase Auth (no server_default) -- the backend never
+generates user UUIDs. Soft deletion sets deleted_at rather than removing rows,
+so reviews and activity history are preserved per the privacy policy.
+"""
+
 import uuid
 from datetime import datetime
 

@@ -1,6 +1,7 @@
 import Foundation
 
 extension Date {
+    // Relative date thresholds: 60s (minute), 3600s (hour), 86400s (day), 604800s (week).
     var feedTimestamp: String {
         let now = Date()
         let interval = now.timeIntervalSince(self)

@@ -34,7 +34,7 @@ struct LogBookSheet: View {
     }
 
     private var isValid: Bool {
-        // Review required for new ratings (imported books exempt)
+        // Require a review when rating — matches backend validation. Imported books are exempt since they were rated elsewhere.
         if rating > 0 && existingUserBook == nil && reviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return false
         }

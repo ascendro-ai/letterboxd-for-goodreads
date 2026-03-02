@@ -1,3 +1,10 @@
+"""Goodreads and StoryGraph CSV import service.
+
+Parses exported CSV files, matches books to our catalog via a waterfall
+strategy (ISBN-13 -> ISBN-10 -> exact title -> fuzzy), and creates UserBook
+entries. Runs as a background task with periodic progress updates.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -341,8 +348,12 @@ async def _match_book(
     title: str,
     author: str,
 ) -> Work | None:
-    """Matching waterfall: ISBN-13 → ISBN-10 → exact title+author → fuzzy."""
-    # 1. ISBN-13
+    """Matching waterfall: ISBN-13 -> ISBN-10 -> exact title+author -> fuzzy.
+
+    Order matters: ISBN is the most precise identifier, so we try it first.
+    Fuzzy ILIKE is a last resort -- it can produce false positives for common titles.
+    """
+    # 1. ISBN-13 (most precise -- globally unique identifier)
     if isbn13:
         result = await db.execute(select(Edition).where(Edition.isbn_13 == isbn13))
         edition = result.scalar_one_or_none()
@@ -382,7 +393,8 @@ async def _create_shelves_for_book(
     bookshelves_str: str,
 ) -> None:
     """Create custom shelves from Goodreads bookshelves column and add the book."""
-    # Skip standard Goodreads shelves (handled as status)
+    # Goodreads' "read", "currently-reading", "to-read" map to UserBook.status,
+    # not custom shelves. Only import user-created shelves.
     standard = {"read", "currently-reading", "to-read"}
     shelves = [s.strip() for s in bookshelves_str.split(",") if s.strip() not in standard]
 
@@ -428,7 +440,8 @@ def parse_goodreads_isbn(raw: str) -> str | None:
     """Parse Goodreads ISBN format: =\"0123456789\" or plain number."""
     if not raw:
         return None
-    # Remove Goodreads ="" quoting (including curly quotes)
+    # Goodreads wraps ISBNs as ="0123456789" -- strip the ="" wrapper.
+    # Also handle curly quotes (\u201c \u201d) from Excel-exported CSVs.
     cleaned = re.sub(r'[="\u201c\u201d]', "", raw).strip()
     if not cleaned:
         return None
@@ -454,6 +467,8 @@ def _parse_date(date_str: str) -> datetime | None:
     """Parse common date formats from CSV exports."""
     if not date_str or not date_str.strip():
         return None
+    # Goodreads uses YYYY/MM/DD, StoryGraph uses YYYY-MM-DD.
+    # US and EU locale formats included as fallbacks.
     for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
         try:
             return datetime.strptime(date_str.strip(), fmt)

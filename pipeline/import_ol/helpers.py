@@ -13,6 +13,7 @@ import orjson
 from pipeline.config import SHELF_UUID_NAMESPACE
 
 
+# Idempotent: same OL ID always produces same UUID, safe to re-run imports.
 def generate_uuid(ol_id: str) -> uuid.UUID:
     """Generate a deterministic UUID5 from an Open Library ID.
 
@@ -68,6 +69,7 @@ def extract_year(date_str: Any) -> int | None:
     match = re.search(r"\b(\d{4})\b", date_str)
     if match:
         year = int(match.group(1))
+        # Filter junk data: year 0, negatives, and future dates beyond 2100.
         if 1000 <= year <= 2100:
             return year
     return None

@@ -5,7 +5,8 @@ import SwiftUI
 
 enum AdConfig {
     static let nativeAdUnitID = "" // TODO: Set AdMob ad unit ID
-    static let adFrequency = 8 // Show ad every N items in feed
+    // Show one ad per 8 content items — balances revenue with user experience. Premium users see no ads.
+    static let adFrequency = 8
 }
 
 // MARK: - Ad Service

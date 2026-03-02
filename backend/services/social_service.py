@@ -1,3 +1,10 @@
+"""Social graph service: follow, block, mute, and taste matches.
+
+Block semantics: blocking auto-unfollows in both directions and removes any
+mutes, ensuring complete separation. is_blocked() checks both directions --
+if either party has blocked the other, they can't interact.
+"""
+
 from __future__ import annotations
 
 from uuid import UUID

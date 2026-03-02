@@ -1,4 +1,4 @@
-"""Deduplication logic for Open Library bulk imports."""
+"""Upsert SQL generators with conflict resolution for bulk imports."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ def authors_on_conflict_sql() -> str:
         FROM staging_authors
         ON CONFLICT (open_library_author_id) DO UPDATE SET
             name = EXCLUDED.name,
+            -- COALESCE preserves existing data when incoming value is NULL
             bio = COALESCE(EXCLUDED.bio, authors.bio),
             updated_at = NOW()
     """

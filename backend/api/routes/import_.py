@@ -1,3 +1,5 @@
+"""CSV import routes for Goodreads and StoryGraph libraries."""
+
 # LIMITATION: Import processing uses asyncio.create_task() which runs in the
 # same process as the web server. This means:
 #   - Tasks are lost if the server restarts mid-import

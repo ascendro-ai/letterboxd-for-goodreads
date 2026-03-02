@@ -23,3 +23,9 @@ build/
 # Caches
 .pytest_cache/
 .ruff_cache/
+
+# Git worktrees
+shelf-database/
+shelf-backend/
+shelf-ios/
+shelf-pipeline/

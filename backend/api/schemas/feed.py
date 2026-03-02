@@ -1,3 +1,5 @@
+"""Pydantic schemas for activity feed and notification endpoints."""
+
 from __future__ import annotations
 
 from datetime import datetime

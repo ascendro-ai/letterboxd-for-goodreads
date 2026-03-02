@@ -39,7 +39,9 @@ from pipeline.import_ol.parse_works import stream_works
 
 logger = logging.getLogger(__name__)
 
+# Larger batches = fewer DB round trips but more memory. 10K is a good balance.
 DEFAULT_BATCH_SIZE = 10_000
+# Log progress every 100K rows to avoid flooding logs on 40M+ row imports.
 LOG_EVERY_N_ROWS = 100_000
 
 
@@ -60,7 +62,7 @@ def download_dump(url: str, dest: Path) -> Path:
 
 # -- Staging table DDL ---------------------------------------------------------
 
-
+# UNLOGGED skips WAL for ~2x write speed. Acceptable: staging data is ephemeral.
 STAGING_AUTHORS_DDL = """
     CREATE UNLOGGED TABLE IF NOT EXISTS staging_authors (
         id UUID, name TEXT, bio TEXT, photo_url TEXT,
@@ -321,7 +323,7 @@ def main(argv: list[str] | None = None) -> None:
     start = time.monotonic()
 
     with sync_connection(config) as conn:
-        # Import order: authors → works (+ work_authors) → editions
+        # Order: authors → works → editions. FK dependencies require this sequence.
         if do_authors:
             import_authors(conn, dump_dir / "ol_dump_authors_latest.txt.gz", args.batch_size)
         if do_works:

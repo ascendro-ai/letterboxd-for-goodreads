@@ -1,3 +1,5 @@
+"""Book catalog service: search, detail, ISBN lookup, similar books."""
+
 from __future__ import annotations
 
 from uuid import UUID
@@ -172,7 +174,12 @@ async def get_book_reviews(
 
 
 async def get_similar_books(db: AsyncSession, work_id: UUID, limit: int) -> list[BookDetail]:
-    """Simple collaborative filtering: users who rated this highly also rated..."""
+    """Simple collaborative filtering: users who rated this highly also rated...
+
+    Algorithm: find users who gave this book >= 4.0 stars, then surface other
+    books those users also rated >= 4.0. Threshold of 4.0 ensures we only
+    recommend books that enthusiastic readers loved, not just tolerated.
+    """
     # Find users who rated this work >= 4.0
     high_raters = select(UserBook.user_id).where(
         UserBook.work_id == work_id,

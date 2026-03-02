@@ -1,3 +1,8 @@
+/// RevenueCat integration for premium subscriptions.
+///
+/// Guards on empty apiKey allow the app to run without RevenueCat configured
+/// (e.g., in development or CI) — premium features simply stay locked.
+
 import Foundation
 import RevenueCat
 

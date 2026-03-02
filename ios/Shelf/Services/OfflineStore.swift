@@ -1,3 +1,9 @@
+/// SwiftData-backed local cache for offline reading. Stores books and user
+/// activity so the app remains functional without network connectivity.
+///
+/// Status is stored as a String (not enum) because SwiftData's @Model macro
+/// doesn't support enums with raw values in persistent storage.
+
 import Foundation
 import SwiftData
 

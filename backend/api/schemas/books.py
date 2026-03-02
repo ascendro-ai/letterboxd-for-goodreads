@@ -1,3 +1,5 @@
+"""Pydantic schemas for book catalog endpoints."""
+
 from __future__ import annotations
 
 from decimal import Decimal

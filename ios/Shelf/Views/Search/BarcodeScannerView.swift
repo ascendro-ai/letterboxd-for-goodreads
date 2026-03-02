@@ -94,6 +94,8 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         if captureSession.canAddOutput(output) {
             captureSession.addOutput(output)
             output.setMetadataObjectsDelegate(self, queue: .main)
+            // EAN-13 and EAN-8 cover ISBN barcodes on physical books.
+            // ISBN-13 is encoded as EAN-13; ISBN-10 predates EAN and is less common on newer books.
             output.metadataObjectTypes = [.ean13, .ean8]
         }
 

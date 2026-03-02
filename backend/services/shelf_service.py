@@ -1,3 +1,8 @@
+"""Custom shelf CRUD and book membership service.
+
+Free tier allows 20 shelves (enough for most readers). Premium unlocks unlimited.
+"""
+
 from __future__ import annotations
 
 from uuid import UUID

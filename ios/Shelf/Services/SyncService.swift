@@ -1,3 +1,6 @@
+/// Offline-first sync engine. Queues mutations (rate, review, status changes)
+/// locally and replays them when connectivity returns.
+
 import Foundation
 import Network
 
@@ -67,6 +70,7 @@ final class SyncService {
             } catch {
                 // Increment retry count, skip if too many failures
                 action.retryCount += 1
+                // Cap retries at 3 to avoid infinite loops on permanently-failing requests (e.g., deleted resources).
                 if action.retryCount > 3 {
                     offlineStore.removePendingAction(action)
                 }

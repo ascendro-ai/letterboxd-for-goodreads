@@ -24,8 +24,8 @@ from pipeline.db import create_async_session_factory
 logger = logging.getLogger(__name__)
 
 # The full SQL for computing and upserting taste matches.
-# max_possible_difference = 4.5 (5.0 - 0.5 rating range)
-# Weight by number of shared books: min(1, count/20) gives full weight at 20+ shared books.
+# Rating scale is 0.5–5.0, so max disagreement = |5.0 - 0.5| = 4.5
+# Confidence weight: 20+ shared books = full weight. Fewer = linearly scaled down.
 TASTE_MATCH_SQL = """
     INSERT INTO taste_matches (user_a_id, user_b_id, match_score, overlapping_books_count, computed_at)
     SELECT

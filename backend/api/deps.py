@@ -1,3 +1,9 @@
+"""FastAPI dependency injection for auth and database sessions.
+
+get_current_user_id() extracts the Supabase user UUID from the JWT.
+get_current_user() additionally loads the full User row (404 if not found).
+"""
+
 from typing import Annotated
 from uuid import UUID
 

@@ -1,3 +1,5 @@
+"""Book catalog routes: search, detail, ISBN lookup, popular, similar books."""
+
 from __future__ import annotations
 
 from uuid import UUID

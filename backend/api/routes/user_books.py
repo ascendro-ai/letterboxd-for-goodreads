@@ -1,3 +1,5 @@
+"""Reading log routes: log, rate, review, update status."""
+
 from __future__ import annotations
 
 from uuid import UUID

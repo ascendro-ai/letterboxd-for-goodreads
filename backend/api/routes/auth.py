@@ -1,3 +1,5 @@
+"""Authentication routes: signup, login (OAuth + email), token refresh, account deletion."""
+
 # LIMITATION: Auth routes proxy directly to Supabase Auth REST API via httpx.
 # These are NOT covered by integration tests (Supabase calls would need to be mocked
 # or a real Supabase project configured). Verify against a live Supabase instance

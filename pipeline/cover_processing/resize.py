@@ -6,6 +6,7 @@ import io
 
 from PIL import Image
 
+# sm: list thumbnails, md: grid cards, lg: detail view, hero: full-screen display
 # Variant definitions: name → max width in pixels
 VARIANTS: dict[str, int] = {
     "thumb": 150,

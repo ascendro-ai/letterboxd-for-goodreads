@@ -1,3 +1,10 @@
+"""Activity feed and notification service.
+
+Uses fan-out-on-read: feed is built at query time by JOINing activities from
+followed users. Simple and correct at our expected scale (<100K users). If
+feed latency exceeds 200ms, switch to fan-out-on-write (precomputed timelines).
+"""
+
 from __future__ import annotations
 
 from uuid import UUID
@@ -45,6 +52,7 @@ async def _get_following_feed(
 ) -> PaginatedResponse[FeedItem]:
     """Fan-out-on-read: activities from followed users, excluding muted/blocked."""
     following_ids = select(Follow.following_id).where(Follow.follower_id == user_id)
+    # Exclude both directions of blocks -- if either party blocked, hide from feed
     blocked_ids = select(Block.blocked_id).where(Block.blocker_id == user_id)
     blocked_by_ids = select(Block.blocker_id).where(Block.blocked_id == user_id)
     muted_ids = select(Mute.muted_id).where(Mute.muter_id == user_id)

@@ -1,3 +1,6 @@
+/// App entry point. Configures the SwiftUI environment with shared services
+/// (auth, analytics, subscriptions) and handles deep links and push notifications.
+
 import SwiftUI
 
 @main

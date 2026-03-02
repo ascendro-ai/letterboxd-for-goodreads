@@ -1,3 +1,13 @@
+"""User-book interaction models: reading log, shelves, and shelf membership.
+
+UserBook is the core logging unit -- one entry per (user, work) pair. Status
+tracks reading progress, while rating uses half-star increments (0.5-5.0)
+stored as Numeric(2,1) with a CHECK constraint.
+
+Shelves are user-created collections (max 20 free, unlimited for premium).
+ShelfBook is the junction table linking shelves to user_books.
+"""
+
 import enum
 import uuid
 from datetime import date

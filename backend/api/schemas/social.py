@@ -1,3 +1,5 @@
+"""Pydantic schemas for social graph endpoints."""
+
 from decimal import Decimal
 
 from backend.api.schemas.users import UserBrief

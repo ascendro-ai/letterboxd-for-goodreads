@@ -1,3 +1,9 @@
+/// Manages authentication state via Supabase Auth (Apple, Google, email+password).
+///
+/// Tokens are persisted in Keychain. On launch, restoreSession() attempts to
+/// reload the saved token and silently refresh if expired — the user stays
+/// logged in across app restarts.
+
 import Foundation
 import AuthenticationServices
 
@@ -130,6 +136,8 @@ final class AuthService {
 
 // MARK: - Keychain Helper
 
+// Delete-before-add pattern: SecItemUpdate is unreliable on some iOS versions,
+// so we delete then re-add to guarantee the write succeeds.
 enum KeychainHelper {
     static func save(key: String, value: String) {
         let data = value.data(using: .utf8)!

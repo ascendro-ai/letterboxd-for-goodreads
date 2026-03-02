@@ -15,6 +15,7 @@ from pipeline.import_ol.helpers import (
 )
 
 
+# OL has changed author reference format over time — handle all three for backwards compat.
 def _extract_author_ol_ids(data: dict[str, Any]) -> list[str]:
     """Extract author OL IDs from various OL `authors` array formats.
 
@@ -57,6 +58,7 @@ def _extract_cover_ids(data: dict[str, Any]) -> list[str]:
     covers = data.get("covers", [])
     if not isinstance(covers, list):
         return []
+    # OL uses negative cover IDs to mark deleted images.
     return [str(c) for c in covers if isinstance(c, int) and c > 0]
 
 

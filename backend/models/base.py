@@ -1,3 +1,9 @@
+"""SQLAlchemy declarative base and shared mixins.
+
+PgArray and PgJSONB are TypeDecorator shims that use native Postgres types
+(ARRAY, JSONB) in production but fall back to JSON for SQLite-based tests.
+"""
+
 import uuid
 from datetime import datetime
 

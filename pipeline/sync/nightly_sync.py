@@ -25,6 +25,7 @@ from pipeline.models import Author, SyncState, Work, WorkAuthor
 logger = logging.getLogger(__name__)
 
 RECENT_CHANGES_URL = "https://openlibrary.org/recentchanges"
+# Only sync work/edition/author changes — ignore lists, user edits, etc.
 RELEVANT_KINDS = {"add-book", "edit-book", "add-work", "edit-work", "add-author", "edit-author"}
 
 

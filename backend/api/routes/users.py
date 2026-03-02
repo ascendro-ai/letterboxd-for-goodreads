@@ -1,3 +1,5 @@
+"""User profile and social graph routes: follow, block, mute, taste matches."""
+
 from __future__ import annotations
 
 from uuid import UUID

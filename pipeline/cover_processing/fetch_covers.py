@@ -23,7 +23,7 @@ from pipeline.models import Edition, Work
 
 logger = logging.getLogger(__name__)
 
-# Minimum image size — OL sometimes returns tiny 1x1 placeholder images
+# OL returns tiny 1x1 placeholder images for missing covers — anything under 1KB is not a real cover.
 MIN_IMAGE_BYTES = 1024
 
 

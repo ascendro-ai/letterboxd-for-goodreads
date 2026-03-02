@@ -1,3 +1,9 @@
+"""Standardized HTTP error response helpers.
+
+All API errors use a consistent JSON shape: {"error": {"code": ..., "message": ...}}.
+These helpers centralize status codes so routes stay clean.
+"""
+
 from fastapi import HTTPException
 
 

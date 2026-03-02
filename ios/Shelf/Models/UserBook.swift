@@ -1,3 +1,6 @@
+/// Reading log entry tying a user to a work. Maps to the backend's UserBook model.
+/// Rating uses half-star increments (0.5–5.0) to match Letterboxd-style granularity.
+
 import Foundation
 
 // MARK: - Reading Status

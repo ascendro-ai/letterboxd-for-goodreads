@@ -1,3 +1,5 @@
+"""Activity feed and notification routes."""
+
 from __future__ import annotations
 
 from backend.api.deps import DB, CurrentUser

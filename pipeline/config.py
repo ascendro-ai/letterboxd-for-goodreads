@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-# Deterministic UUID5 namespace for generating book/author UUIDs from OL IDs.
+# Deterministic namespace for UUID5 — same OL ID always produces same UUID, making imports idempotent.
 SHELF_UUID_NAMESPACE = uuid.UUID("a3f1b2c4-d5e6-7890-abcd-ef1234567890")
 
 # Open Library dump URLs
@@ -65,7 +65,7 @@ class GoogleBooksConfig:
     """Google Books API settings."""
 
     api_key: str = ""
-    daily_limit: int = 1000
+    daily_limit: int = 1000  # Google Books API free tier quota
 
     @classmethod
     def from_env(cls) -> GoogleBooksConfig:

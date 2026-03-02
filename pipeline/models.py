@@ -1,8 +1,8 @@
-"""Stub SQLAlchemy models for pipeline use.
+"""Pipeline-local SQLAlchemy models.
 
-# TODO: provided by backend/database
-These models are stubs matching the schema in technical-decisions-final.md.
-When backend/database merges, replace these with imports from backend.models.
+These mirror the backend models but are defined separately so the pipeline
+can run independently without importing the backend package.
+TODO: unify with backend/models/ once both packages share a common dependency.
 """
 
 from __future__ import annotations

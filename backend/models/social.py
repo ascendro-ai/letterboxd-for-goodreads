@@ -1,3 +1,11 @@
+"""Social graph models: follows, blocks, mutes, and activity feed.
+
+Follow is unidirectional. Block is symmetric in effect -- blocking someone
+also auto-unfollows in both directions and removes any mutes.
+Activity records are created on status changes (started/finished) and power
+the fan-out-on-read feed.
+"""
+
 import enum
 import uuid
 from datetime import datetime

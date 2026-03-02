@@ -1,3 +1,10 @@
+"""Cursor-keyset pagination for feed and list endpoints.
+
+Uses (created_at, id) as a compound cursor to avoid offset-based pagination
+problems (inconsistent pages when new rows are inserted). The cursor is
+base64-encoded so clients treat it as an opaque string.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -37,4 +44,6 @@ def apply_cursor_filter(query: Select, model: type, cursor: str | None) -> Selec
     if decoded is None:
         return query
     ts, id_ = decoded
+    # Tie-break on id when created_at matches -- guarantees stable ordering
+    # even with identical timestamps
     return query.where((model.created_at < ts) | ((model.created_at == ts) & (model.id < id_)))

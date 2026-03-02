@@ -46,6 +46,7 @@ class R2Uploader:
             Key=key,
             Body=image_data,
             ContentType=content_type,
+            # Covers are immutable — cache 1 year. 'immutable' tells browsers to never revalidate.
             CacheControl="public, max-age=31536000, immutable",
         )
         logger.debug("Uploaded %s", key)

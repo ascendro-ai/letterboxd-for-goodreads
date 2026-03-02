@@ -1,5 +1,6 @@
 """Live fallback: on-demand search and import for books not yet in local DB.
 
+Used when a user searches for a book not yet in our catalog (cache miss).
 Called by the backend search endpoint when local DB has no results.
 """
 

@@ -1,3 +1,5 @@
+"""FastAPI application factory and middleware configuration."""
+
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 

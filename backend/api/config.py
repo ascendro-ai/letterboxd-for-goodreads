@@ -1,3 +1,8 @@
+"""Application configuration loaded from environment variables.
+
+Settings are cached via @lru_cache so env is read once at startup.
+"""
+
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
@@ -15,8 +20,8 @@ class Settings(BaseSettings):
     bookshop_affiliate_id: str = ""
     environment: str = "development"
     default_page_limit: int = 20
-    max_page_limit: int = 100
-    max_shelves_free: int = 20
+    max_page_limit: int = 100  # hard cap to prevent expensive unbounded queries
+    max_shelves_free: int = 20  # premium unlocks unlimited shelves
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -1,3 +1,6 @@
+/// Share extension that extracts ISBNs from shared URLs (Amazon, Bookshop.org,
+/// Goodreads, Google Books) and opens the main app to log the book.
+
 import UIKit
 import Social
 import UniformTypeIdentifiers
@@ -89,6 +92,7 @@ class ShareViewController: UIViewController {
         }
     }
 
+    // ISBNs are either 10 or 13 digits. Extract the first numeric sequence of that length from known URL patterns.
     private func extractISBN(from url: URL) -> String? {
         let urlString = url.absoluteString
 

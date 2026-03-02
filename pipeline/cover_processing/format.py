@@ -32,6 +32,7 @@ def convert_to_webp(image_data: bytes) -> tuple[bytes, str]:
     # Try WebP first
     try:
         buf = io.BytesIO()
+        # Quality 85 balances file size (~60% smaller than JPEG) with visual fidelity.
         img.save(buf, format="WEBP", quality=85)
         return buf.getvalue(), "image/webp"
     except Exception:

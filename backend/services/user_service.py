@@ -1,3 +1,5 @@
+"""User profile service: view, update, search, and soft delete."""
+
 from __future__ import annotations
 
 from uuid import UUID

@@ -12,7 +12,7 @@ from pipeline.import_ol.helpers import (
     stream_tsv_lines,
 )
 
-# Normalize OL format strings to our standard set
+# Normalize OL's free-text format strings into our four canonical formats.
 FORMAT_MAP: dict[str, str] = {
     "hardcover": "hardcover",
     "hardback": "hardcover",
@@ -67,6 +67,7 @@ def _extract_language(data: dict[str, Any]) -> str | None:
 
 def _extract_page_count(data: dict[str, Any]) -> int | None:
     """Extract page count, handling various OL formats."""
+    # OL stores page counts inconsistently — sometimes in number_of_pages, sometimes in pagination as text.
     pages = data.get("number_of_pages")
     if isinstance(pages, int) and pages > 0:
         return pages

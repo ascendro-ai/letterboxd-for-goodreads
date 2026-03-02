@@ -1,3 +1,9 @@
+/// HTTP client wrapping URLSession for all backend API calls.
+///
+/// Automatically attaches the Supabase JWT from AuthService, handles token
+/// refresh on 401 responses, and provides typed JSON decoding. All methods
+/// throw ``APIError`` on failure.
+
 import Foundation
 
 // MARK: - API Configuration

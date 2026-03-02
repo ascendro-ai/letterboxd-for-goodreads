@@ -1,3 +1,10 @@
+"""Book catalog models: works, editions, and authors.
+
+Follows a Work-Edition hierarchy (like FRBR): a Work is an abstract creative
+entity ("Dune"), while Editions are concrete publications (hardcover, Kindle,
+etc.). Authors link to Works via a many-to-many junction table.
+"""
+
 import enum
 import uuid
 from decimal import Decimal

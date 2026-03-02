@@ -1,3 +1,7 @@
+/// Custom SwiftUI Layout that arranges children in a horizontal flow,
+/// wrapping to the next row when items exceed the container width.
+/// Used for genre/subject tag chips on book detail views.
+
 import SwiftUI
 
 struct FlowLayout: Layout {

@@ -1,3 +1,5 @@
+"""Custom shelf CRUD and book membership routes."""
+
 from __future__ import annotations
 
 from uuid import UUID

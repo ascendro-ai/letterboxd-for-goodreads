@@ -1,3 +1,6 @@
+/// Interactive half-star rating input. Supports 0.5-increment taps matching
+/// the backend's Numeric(2,1) rating storage.
+
 import SwiftUI
 
 // MARK: - Interactive Star Rating Input

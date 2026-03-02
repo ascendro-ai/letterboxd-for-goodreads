@@ -1,3 +1,10 @@
+"""Precomputed taste compatibility scores between users.
+
+Recomputed nightly by the pipeline's taste_match_job. Only generated when
+two users share at least 5 rated books. match_score ranges from 0.0 (opposite
+tastes) to 1.0 (identical ratings on all shared books).
+"""
+
 import uuid
 from datetime import datetime
 from decimal import Decimal

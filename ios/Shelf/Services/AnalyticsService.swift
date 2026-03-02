@@ -1,3 +1,8 @@
+/// PostHog analytics and Sentry error tracking.
+///
+/// Sampling rates (20% analytics, 10% performance) keep costs manageable
+/// during early growth. Adjust upward once usage patterns stabilize.
+
 import Foundation
 import Sentry
 import PostHog
@@ -19,8 +24,8 @@ enum AnalyticsService {
         guard !sentryDSN.isEmpty else { return }
         SentrySDK.start { options in
             options.dsn = sentryDSN
-            options.tracesSampleRate = 0.2
-            options.profilesSampleRate = 0.1
+            options.tracesSampleRate = 0.2   // 20% of traces — keeps analytics costs manageable
+            options.profilesSampleRate = 0.1  // 10% of profiles — performance sampling
             options.attachScreenshot = true
             options.enableMetricKit = true
             #if DEBUG

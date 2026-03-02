@@ -1,3 +1,13 @@
+"""Reading log service: log books, rate, review, update status.
+
+Business rules:
+- Ratings require a review (encourages thoughtful engagement). Imported books
+  are exempt since they were already rated on another platform.
+- Only "reading" and "read" status changes create Activity entries. "Want to
+  read" and "did not finish" are silent -- they'd clutter feeds without being
+  interesting to followers.
+"""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -198,7 +208,11 @@ async def list_user_books(
 
 
 async def _update_work_rating(db: AsyncSession, work_id: UUID) -> None:
-    """Recalculate average_rating and ratings_count for a work."""
+    """Recalculate average_rating and ratings_count for a work.
+
+    Called after every rating change. Uses SQL avg/count for correctness.
+    round(, 2) matches the Numeric(3,2) column precision.
+    """
     result = await db.execute(
         select(
             func.count().label("cnt"),

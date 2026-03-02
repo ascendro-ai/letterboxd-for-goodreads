@@ -1,3 +1,10 @@
+"""Async database engine and session factory.
+
+Session lifecycle: FastAPI's dependency injection creates a session per request.
+On success the session auto-commits; on exception it rolls back. Individual
+service methods should NOT call commit() -- the dependency handles it.
+"""
+
 from collections.abc import AsyncGenerator
 
 from backend.api.config import get_settings

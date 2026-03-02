@@ -22,7 +22,7 @@ final class SearchViewModel {
 
         searchTask?.cancel()
         searchTask = Task { @MainActor in
-            // Debounce
+            // 300ms debounce prevents firing a search on every keystroke while still feeling responsive.
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
 

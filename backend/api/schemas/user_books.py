@@ -1,3 +1,5 @@
+"""Pydantic schemas for reading log endpoints."""
+
 from __future__ import annotations
 
 from datetime import datetime
