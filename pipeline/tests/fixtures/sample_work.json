@@ -1,0 +1,12 @@
+{
+    "key": "/works/OL5678W",
+    "title": "Pride and Prejudice",
+    "description": "A classic novel about the Bennet family.",
+    "first_publish_date": "1813",
+    "subjects": ["Fiction", "Romance", "Classic Literature"],
+    "covers": [12345, -1, 67890],
+    "authors": [
+        {"author": {"key": "/authors/OL1234A"}, "type": {"key": "/type/author_role"}}
+    ],
+    "type": {"key": "/type/work"}
+}

@@ -1,0 +1,42 @@
+[
+    {
+        "id": "12345",
+        "kind": "edit-book",
+        "timestamp": "2024-01-15T10:30:00",
+        "comment": "Updated title",
+        "changes": [
+            {"key": "/works/OL5678W", "revision": 5}
+        ],
+        "author": {
+            "key": "/people/editor1"
+        },
+        "ip": null,
+        "data": {}
+    },
+    {
+        "id": "12346",
+        "kind": "add-book",
+        "timestamp": "2024-01-15T10:31:00",
+        "comment": "Added new book",
+        "changes": [
+            {"key": "/works/OL9999W", "revision": 1}
+        ],
+        "author": {
+            "key": "/people/editor2"
+        },
+        "ip": null,
+        "data": {}
+    },
+    {
+        "id": "12347",
+        "kind": "update-account",
+        "timestamp": "2024-01-15T10:32:00",
+        "comment": "Account update",
+        "changes": [],
+        "author": {
+            "key": "/people/user1"
+        },
+        "ip": null,
+        "data": {}
+    }
+]

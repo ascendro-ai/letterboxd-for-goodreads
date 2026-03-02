@@ -1,0 +1,13 @@
+{
+    "key": "/books/OL9999M",
+    "title": "Pride and Prejudice",
+    "isbn_10": ["0141439513"],
+    "isbn_13": ["9780141439518"],
+    "publishers": ["Penguin Classics"],
+    "publish_date": "January 28, 2003",
+    "number_of_pages": 480,
+    "physical_format": "Paperback",
+    "languages": [{"key": "/languages/eng"}],
+    "works": [{"key": "/works/OL5678W"}],
+    "type": {"key": "/type/edition"}
+}

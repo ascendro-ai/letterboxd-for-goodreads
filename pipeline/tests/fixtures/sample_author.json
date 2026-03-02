@@ -1,0 +1,9 @@
+{
+    "key": "/authors/OL1234A",
+    "name": "Jane Austen",
+    "bio": {
+        "type": "/type/text",
+        "value": "English novelist known for her social commentary."
+    },
+    "type": {"key": "/type/author"}
+}
