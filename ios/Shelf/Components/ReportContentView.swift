@@ -45,11 +45,11 @@ struct ReportContentView: View {
                     } label: {
                         HStack {
                             Text(reason.rawValue)
-                                .foregroundStyle(.primary)
+                                .foregroundStyle(ShelfColors.textPrimary)
                             Spacer()
                             if selectedReason == reason {
                                 Image(systemName: "checkmark")
-                                    .foregroundStyle(Color.accentColor)
+                                    .foregroundStyle(ShelfColors.accent)
                             }
                         }
                     }
@@ -80,23 +80,25 @@ struct ReportContentView: View {
     }
 
     private var submittedView: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: ShelfSpacing.lg) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 48))
-                .foregroundStyle(.green)
+                .foregroundStyle(ShelfColors.forest)
 
             Text("Report Submitted")
-                .font(.title3.bold())
+                .font(ShelfFonts.headlineSerif)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text("Thank you for helping keep Shelf safe. We'll review this report.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
             Button("Done") { dismiss() }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 8)
+                .shelfPrimaryButton()
+                .padding(.top, ShelfSpacing.sm)
+                .padding(.horizontal, ShelfSpacing.xxxl)
         }
         .navigationBarBackButtonHidden()
     }

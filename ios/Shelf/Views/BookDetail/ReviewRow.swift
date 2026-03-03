@@ -4,21 +4,22 @@ struct ReviewRow: View {
     let review: Review
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
             HStack(spacing: 10) {
                 UserAvatarView(url: review.user.avatarURL, size: 32)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(review.user.username)
-                        .font(.subheadline.weight(.semibold))
+                        .font(ShelfFonts.subheadlineBold)
+                        .foregroundStyle(ShelfColors.textPrimary)
 
-                    HStack(spacing: 4) {
+                    HStack(spacing: ShelfSpacing.xxs) {
                         if let rating = review.rating {
                             StarRatingDisplay(rating: rating, size: 10)
                         }
                         Text(review.createdAt.feedTimestamp)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(ShelfFonts.caption2)
+                            .foregroundStyle(ShelfColors.textTertiary)
                     }
                 }
 
@@ -27,11 +28,10 @@ struct ReviewRow: View {
 
             if let text = review.reviewText, !text.isEmpty {
                 SpoilerText(text: text, hasSpoilers: review.hasSpoilers)
-                    .font(.subheadline)
             }
         }
         .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.vertical, ShelfSpacing.sm)
     }
 }
 
@@ -41,24 +41,24 @@ struct UserBookReviewRow: View {
     let userBook: UserBook
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
             HStack(spacing: 10) {
                 Image(systemName: "person.circle.fill")
                     .font(.title2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ShelfColors.textTertiary)
 
                 VStack(alignment: .leading, spacing: 2) {
                     if let rating = userBook.rating {
-                        HStack(spacing: 4) {
+                        HStack(spacing: ShelfSpacing.xxs) {
                             StarRatingDisplay(rating: rating, size: 10)
                             Text(userBook.createdAt.feedTimestamp)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .font(ShelfFonts.caption2)
+                                .foregroundStyle(ShelfColors.textTertiary)
                         }
                     } else {
                         Text(userBook.createdAt.feedTimestamp)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(ShelfFonts.caption2)
+                            .foregroundStyle(ShelfColors.textTertiary)
                     }
                 }
 
@@ -67,10 +67,9 @@ struct UserBookReviewRow: View {
 
             if let text = userBook.reviewText, !text.isEmpty {
                 SpoilerText(text: text, hasSpoilers: userBook.hasSpoilers)
-                    .font(.subheadline)
             }
         }
         .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.vertical, ShelfSpacing.sm)
     }
 }

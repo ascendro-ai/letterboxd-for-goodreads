@@ -14,20 +14,18 @@ struct SignUpView: View {
     }
 
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 16) {
+        VStack(spacing: ShelfSpacing.xxl) {
+            VStack(spacing: ShelfSpacing.lg) {
                 TextField("Username", text: $username)
                     .textContentType(.username)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .shelfTextField()
 
                 if !username.isEmpty && username.count < 3 {
                     Text("Username must be at least 3 characters")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.amber)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
@@ -36,28 +34,24 @@ struct SignUpView: View {
                     .keyboardType(.emailAddress)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .shelfTextField()
 
                 SecureField("Password (8+ characters)", text: $password)
                     .textContentType(.newPassword)
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .shelfTextField()
 
                 if !password.isEmpty && password.count < 8 {
                     Text("Password must be at least 8 characters")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.amber)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                    .font(ShelfFonts.caption)
+                    .foregroundStyle(ShelfColors.error)
             }
 
             Button {
@@ -69,20 +63,17 @@ struct SignUpView: View {
                             .tint(.white)
                     } else {
                         Text("Create Account")
-                            .fontWeight(.semibold)
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 50)
-                .background(isFormValid ? Color.accentColor : Color.gray)
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .shelfPrimaryButton()
+                .opacity(isFormValid ? 1.0 : 0.5)
             }
             .disabled(isLoading || !isFormValid)
 
             Spacer()
         }
-        .padding(24)
+        .padding(ShelfSpacing.xxl)
+        .background(ShelfColors.background)
         .navigationTitle("Create Account")
         .navigationBarTitleDisplayMode(.large)
     }

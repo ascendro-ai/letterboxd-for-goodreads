@@ -27,6 +27,7 @@ struct TasteMatchesView: View {
         }
         .navigationTitle("Taste Matches")
         .task { await load() }
+        .shelfPageBackground()
     }
 
     private var matchesList: some View {
@@ -35,28 +36,31 @@ struct TasteMatchesView: View {
                 NavigationLink {
                     UserProfileView(userID: match.user.id)
                 } label: {
-                    HStack(spacing: 12) {
+                    HStack(spacing: ShelfSpacing.md) {
                         UserAvatarView(url: match.user.avatarURL, size: 44)
 
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: ShelfSpacing.xxs) {
                             Text(match.user.username)
-                                .font(.subheadline.weight(.semibold))
+                                .font(ShelfFonts.subheadlineBold)
+                                .foregroundStyle(ShelfColors.textPrimary)
 
                             Text("\(match.overlappingBooksCount) books in common")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(ShelfFonts.caption)
+                                .foregroundStyle(ShelfColors.textSecondary)
                         }
 
                         Spacer()
 
                         Text("\(Int(match.matchScore * 100))%")
-                            .font(.title3.bold())
-                            .foregroundStyle(Color.accentColor)
+                            .font(ShelfFonts.dataMedium)
+                            .foregroundStyle(ShelfColors.accent)
                     }
                 }
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(ShelfColors.background)
     }
 
     private func load() async {

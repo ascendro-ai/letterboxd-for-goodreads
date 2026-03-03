@@ -23,9 +23,9 @@ enum ReadingStatus: String, Codable, CaseIterable {
     var iconName: String {
         switch self {
         case .reading: "book.fill"
-        case .read: "checkmark.circle.fill"
+        case .read: "book.closed.fill"
         case .wantToRead: "bookmark.fill"
-        case .didNotFinish: "xmark.circle.fill"
+        case .didNotFinish: "book.closed"
         }
     }
 }

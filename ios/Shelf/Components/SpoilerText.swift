@@ -7,26 +7,27 @@ struct SpoilerText: View {
 
     var body: some View {
         if hasSpoilers && !isRevealed {
-            VStack(spacing: 8) {
+            VStack(spacing: ShelfSpacing.sm) {
                 Label("Contains spoilers", systemImage: "eye.slash")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.subheadlineSans)
+                    .foregroundStyle(ShelfColors.textSecondary)
 
                 Button("Tap to reveal") {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         isRevealed = true
                     }
                 }
-                .font(.subheadline.weight(.medium))
+                .font(ShelfFonts.subheadlineBold)
             }
             .frame(maxWidth: .infinity)
             .padding()
-            .background(Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .background(ShelfColors.backgroundSecondary)
+            .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.medium))
             .accessibilityHint("Double tap to reveal spoiler content")
         } else {
             Text(text)
-                .font(.body)
+                .font(ShelfFonts.bodySerif)
+                .foregroundStyle(ShelfColors.textPrimary)
         }
     }
 }

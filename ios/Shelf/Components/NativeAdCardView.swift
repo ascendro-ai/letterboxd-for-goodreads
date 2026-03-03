@@ -11,14 +11,14 @@ struct NativeAdCardView: View {
     private let adService = AdService.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
+            HStack(spacing: ShelfSpacing.xs) {
                 Text("Sponsored")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
+                    .font(ShelfFonts.captionBold)
+                    .foregroundStyle(ShelfColors.textSecondary)
+                    .padding(.horizontal, ShelfSpacing.xs)
                     .padding(.vertical, 2)
-                    .background(Color(.systemGray5))
+                    .background(ShelfColors.backgroundTertiary)
                     .clipShape(Capsule())
                 Spacer()
             }
@@ -40,17 +40,17 @@ struct NativeAdCardView: View {
     }
 
     private var placeholderContent: some View {
-        HStack(spacing: 12) {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color(.systemGray5))
+        HStack(spacing: ShelfSpacing.md) {
+            RoundedRectangle(cornerRadius: ShelfRadius.small)
+                .fill(ShelfColors.backgroundTertiary)
                 .frame(width: 60, height: 90)
 
-            VStack(alignment: .leading, spacing: 4) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color(.systemGray5))
+            VStack(alignment: .leading, spacing: ShelfSpacing.xxs) {
+                RoundedRectangle(cornerRadius: ShelfRadius.small)
+                    .fill(ShelfColors.backgroundTertiary)
                     .frame(height: 14)
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color(.systemGray6))
+                RoundedRectangle(cornerRadius: ShelfRadius.small)
+                    .fill(ShelfColors.backgroundSecondary)
                     .frame(width: 120, height: 12)
                 Spacer()
             }

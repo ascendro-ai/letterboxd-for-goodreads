@@ -17,6 +17,7 @@ struct BookCoverImage: View {
                             .aspectRatio(contentMode: .fill)
                             .frame(width: size.width, height: size.height)
                             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                            .coverShadow()
                     case .failure:
                         placeholder
                     case .empty:
@@ -38,11 +39,11 @@ struct BookCoverImage: View {
 
     private var placeholder: some View {
         RoundedRectangle(cornerRadius: cornerRadius)
-            .fill(Color(.systemGray5))
+            .fill(ShelfColors.backgroundTertiary)
             .frame(width: size.width, height: size.height)
             .overlay {
                 Image(systemName: "book.closed.fill")
-                    .foregroundStyle(.quaternary)
+                    .foregroundStyle(ShelfColors.textTertiary)
                     .font(.system(size: size.width * 0.3))
             }
     }
@@ -55,12 +56,22 @@ struct HeroBookCover: View {
     var bookTitle: String? = nil
 
     var body: some View {
-        BookCoverImage(
-            url: url,
-            size: CGSize(width: 180, height: 270),
-            cornerRadius: 10,
-            bookTitle: bookTitle
-        )
-        .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
+        GeometryReader { geometry in
+            let midY = geometry.frame(in: .global).midY
+            let screenHeight = UIScreen.main.bounds.height
+            let scrollProgress = midY / screenHeight
+            let scale = 1.0 + max(0, min(0.05, (scrollProgress - 0.3) * 0.1))
+
+            BookCoverImage(
+                url: url,
+                size: CGSize(width: 180, height: 270),
+                cornerRadius: 10,
+                bookTitle: bookTitle
+            )
+            .coverShadow(isHero: true)
+            .scaleEffect(scale)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(width: 180, height: 270)
     }
 }

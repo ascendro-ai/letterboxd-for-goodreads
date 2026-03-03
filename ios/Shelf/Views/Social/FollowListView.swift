@@ -44,6 +44,7 @@ struct FollowListView: View {
         }
         .navigationTitle(listType.title)
         .task { await load() }
+        .shelfPageBackground()
     }
 
     private var usersList: some View {
@@ -51,21 +52,24 @@ struct FollowListView: View {
             NavigationLink {
                 UserProfileView(userID: user.id)
             } label: {
-                HStack(spacing: 12) {
+                HStack(spacing: ShelfSpacing.md) {
                     UserAvatarView(url: user.avatarURL, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(user.username)
-                            .font(.subheadline.weight(.semibold))
+                            .font(ShelfFonts.subheadlineBold)
+                            .foregroundStyle(ShelfColors.textPrimary)
                         if let displayName = user.displayName {
                             Text(displayName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(ShelfFonts.caption)
+                                .foregroundStyle(ShelfColors.textSecondary)
                         }
                     }
                 }
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(ShelfColors.background)
     }
 
     private func load() async {

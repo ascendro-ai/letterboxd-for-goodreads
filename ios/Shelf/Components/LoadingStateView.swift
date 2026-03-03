@@ -6,11 +6,12 @@ struct LoadingStateView: View {
     var message: String = "Loading..."
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: ShelfSpacing.md) {
             ProgressView()
+                .tint(ShelfColors.accent)
             Text(message)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .combine)
@@ -27,24 +28,28 @@ struct EmptyStateView: View {
     var actionTitle: String?
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: ShelfSpacing.lg) {
             Image(systemName: icon)
                 .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(ShelfColors.textTertiary)
 
             Text(title)
-                .font(.title3.weight(.semibold))
+                .font(ShelfFonts.headlineSerif)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text(message)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+                .padding(.horizontal, ShelfSpacing.xxxl)
 
             if let action, let actionTitle {
-                Button(actionTitle, action: action)
-                    .buttonStyle(.borderedProminent)
-                    .padding(.top, 4)
+                Button(action: action) {
+                    Text(actionTitle)
+                        .shelfPrimaryButton()
+                }
+                .padding(.top, ShelfSpacing.xxs)
+                .padding(.horizontal, ShelfSpacing.xxxl)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -59,23 +64,27 @@ struct ErrorStateView: View {
     var retry: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: ShelfSpacing.lg) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 40))
-                .foregroundStyle(.orange)
+                .foregroundStyle(ShelfColors.amber)
 
             Text("Something went wrong")
-                .font(.title3.weight(.semibold))
+                .font(ShelfFonts.headlineSerif)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text(error.localizedDescription)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+                .padding(.horizontal, ShelfSpacing.xxxl)
 
             if let retry {
-                Button("Try Again", action: retry)
-                    .buttonStyle(.borderedProminent)
+                Button(action: retry) {
+                    Text("Try Again")
+                        .shelfPrimaryButton()
+                }
+                .padding(.horizontal, ShelfSpacing.xxxl)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

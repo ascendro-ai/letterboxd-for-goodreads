@@ -113,6 +113,12 @@
 		F026E101F1EF8AE9FC39F47A /* Series.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C51196A36F0D7BCC4838FF /* Series.swift */; };
 		F10C2E664B6F09A2AB14A16B /* MockAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF8AD257EE8C7563194826C /* MockAPIClient.swift */; };
 		F90CFB5B879E53455AB3AE75 /* UserBookService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3180D99033A3B0C3477215B /* UserBookService.swift */; };
+		AA11BB22CC33DD44EE55FF66 /* ShelfTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB22CC33DD44EE55FF660011 /* ShelfTheme.swift */; };
+		AA22BB33CC44DD55EE66FF77 /* ShelfViewModifiers.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB33CC44DD55EE66FF770022 /* ShelfViewModifiers.swift */; };
+		AA33BB44CC55DD66EE77FF88 /* MasonryLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB44CC55DD66EE77FF880033 /* MasonryLayout.swift */; };
+		AA44BB55CC66DD77EE88FF99 /* SpineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB55CC66DD77EE88FF990044 /* SpineView.swift */; };
+		AA55BB66CC77DD88EE99FFAA /* ReadingProgressBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB66CC77DD88EE99FFAA0055 /* ReadingProgressBar.swift */; };
+		AA66BB77CC88DD99EEAAFFBB /* DogEarEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB77CC88DD99EEAAFFBB0066 /* DogEarEffect.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -253,6 +259,12 @@
 		FAAA877FB8A350D4FAAD6ACA /* FlowLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowLayout.swift; sourceTree = "<group>"; };
 		FF6D873AD99B7EED9646A158 /* APIModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModelTests.swift; sourceTree = "<group>"; };
 		FFB0C936B80483EEB42404E5 /* BookDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookDetailView.swift; sourceTree = "<group>"; };
+		BB22CC33DD44EE55FF660011 /* ShelfTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShelfTheme.swift; sourceTree = "<group>"; };
+		BB33CC44DD55EE66FF770022 /* ShelfViewModifiers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShelfViewModifiers.swift; sourceTree = "<group>"; };
+		BB44CC55DD66EE77FF880033 /* MasonryLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MasonryLayout.swift; sourceTree = "<group>"; };
+		BB55CC66DD77EE88FF990044 /* SpineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpineView.swift; sourceTree = "<group>"; };
+		BB66CC77DD88EE99FFAA0055 /* ReadingProgressBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingProgressBar.swift; sourceTree = "<group>"; };
+		BB77CC88DD99EEAAFFBB0066 /* DogEarEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DogEarEffect.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -354,6 +366,10 @@
 				8174ADE8F0F1AF8931D39453 /* SpoilerText.swift */,
 				E9040C959071D4F6DB1B3767 /* StarRatingView.swift */,
 				50380A667587A034899C8140 /* UserAvatarView.swift */,
+				BB44CC55DD66EE77FF880033 /* MasonryLayout.swift */,
+				BB55CC66DD77EE88FF990044 /* SpineView.swift */,
+				BB66CC77DD88EE99FFAA0055 /* ReadingProgressBar.swift */,
+				BB77CC88DD99EEAAFFBB0066 /* DogEarEffect.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -560,6 +576,8 @@
 				46219DA3A42FC468F30C0BA9 /* BookIdentifier.swift */,
 				554DC698A7F8CEB42439EADD /* DateExtensions.swift */,
 				16458C4821583FF4B0E9ADD9 /* ISBNValidator.swift */,
+				BB22CC33DD44EE55FF660011 /* ShelfTheme.swift */,
+				BB33CC44DD55EE66FF770022 /* ShelfViewModifiers.swift */,
 			);
 			path = Extensions;
 			sourceTree = "<group>";
@@ -772,6 +790,12 @@
 				DA9A21F13C829978CD60CB9D /* ContentView.swift in Sources */,
 				5D039003822007A223773781 /* CreateShelfView.swift in Sources */,
 				E81BDE6215AF803A6080835C /* DateExtensions.swift in Sources */,
+				AA11BB22CC33DD44EE55FF66 /* ShelfTheme.swift in Sources */,
+				AA22BB33CC44DD55EE66FF77 /* ShelfViewModifiers.swift in Sources */,
+				AA33BB44CC55DD66EE77FF88 /* MasonryLayout.swift in Sources */,
+				AA44BB55CC66DD77EE88FF99 /* SpineView.swift in Sources */,
+				AA55BB66CC77DD88EE99FFAA /* ReadingProgressBar.swift in Sources */,
+				AA66BB77CC88DD99EEAAFFBB /* DogEarEffect.swift in Sources */,
 				24E27339D5874FD09D2D9143 /* DeepLinkHandler.swift in Sources */,
 				CB190A70221C3C682F36E28E /* DiscoverPromptCard.swift in Sources */,
 				1B3F97F5DEBB3F0151DB5557 /* EditProfileView.swift in Sources */,

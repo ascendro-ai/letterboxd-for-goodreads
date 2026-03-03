@@ -16,36 +16,47 @@ struct CreateShelfView: View {
             Form {
                 Section("Name") {
                     TextField("Shelf name", text: $name)
+                        .font(ShelfFonts.bodySans)
                 }
 
                 Section("Description") {
                     TextField("Optional description", text: $description)
+                        .font(ShelfFonts.bodySans)
                 }
 
                 Section {
                     Toggle("Public", isOn: $isPublic)
+                        .font(ShelfFonts.bodySans)
+                        .tint(ShelfColors.accent)
                 } footer: {
                     Text("Public shelves are visible on your profile.")
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.textSecondary)
                 }
 
                 if let errorMessage {
                     Section {
                         Text(errorMessage)
-                            .foregroundStyle(.red)
-                            .font(.caption)
+                            .foregroundStyle(ShelfColors.error)
+                            .font(ShelfFonts.caption)
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(ShelfColors.background)
             .navigationTitle("New Shelf")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .font(ShelfFonts.bodySans)
+                        .foregroundStyle(ShelfColors.accent)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") { create() }
                         .disabled(name.isEmpty || isSaving)
-                        .fontWeight(.semibold)
+                        .font(ShelfFonts.bodySansBold)
+                        .foregroundStyle(ShelfColors.accent)
                 }
             }
         }

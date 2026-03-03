@@ -22,6 +22,7 @@ struct FeedView: View {
                 feedList
             }
         }
+        .shelfPageBackground()
         .navigationTitle("Feed")
         .task {
             if viewModel.items.isEmpty {
@@ -41,20 +42,21 @@ struct FeedView: View {
             LazyVStack(spacing: 0) {
                 // Cold start: show header + discover prompt for popular/mixed feeds
                 if viewModel.isPopularOrMixed {
-                    VStack(spacing: 12) {
+                    VStack(spacing: ShelfSpacing.md) {
                         Text("Popular This Week")
-                            .font(.title3.weight(.semibold))
+                            .font(ShelfFonts.headlineSerif)
+                            .foregroundStyle(ShelfColors.textPrimary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal)
-                            .padding(.top, 8)
+                            .padding(.top, ShelfSpacing.sm)
                             .accessibilityAddTraits(.isHeader)
 
                         DiscoverPromptCard()
                     }
 
-                    Divider()
+                    ShelfDivider()
                         .padding(.horizontal)
-                        .padding(.top, 8)
+                        .padding(.top, ShelfSpacing.sm)
                 }
 
                 ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { index, item in
@@ -63,13 +65,13 @@ struct FeedView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Divider()
+                    ShelfDivider()
                         .padding(.horizontal)
 
                     // Insert native ad card at randomized intervals
                     if adService.shouldInsertAd(at: index) {
                         NativeAdCardView()
-                        Divider()
+                        ShelfDivider()
                             .padding(.horizontal)
                     }
 
@@ -85,6 +87,7 @@ struct FeedView: View {
 
                 if viewModel.isLoadingMore {
                     ProgressView()
+                        .tint(ShelfColors.accent)
                         .padding()
                 }
             }

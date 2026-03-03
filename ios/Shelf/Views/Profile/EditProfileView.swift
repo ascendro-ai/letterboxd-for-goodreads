@@ -15,10 +15,12 @@ struct EditProfileView: View {
         Form {
             Section("Display Name") {
                 TextField("Display name", text: $displayName)
+                    .font(ShelfFonts.bodySans)
             }
 
             Section("Bio") {
                 TextEditor(text: $bio)
+                    .font(ShelfFonts.bodySans)
                     .frame(minHeight: 80)
             }
 
@@ -30,11 +32,11 @@ struct EditProfileView: View {
                         Label("Favorite Books", systemImage: "heart.fill")
                         Spacer()
                         Text("\(favoriteBookIDs.count)/4")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textSecondary)
                         Image(systemName: "chevron.right")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textTertiary)
                     }
                 }
                 .buttonStyle(.plain)
@@ -45,11 +47,13 @@ struct EditProfileView: View {
             if let errorMessage {
                 Section {
                     Text(errorMessage)
-                        .foregroundStyle(.red)
-                        .font(.caption)
+                        .foregroundStyle(ShelfColors.error)
+                        .font(ShelfFonts.caption)
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(ShelfColors.background)
         .navigationTitle("Edit Profile")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

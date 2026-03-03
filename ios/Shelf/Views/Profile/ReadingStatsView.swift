@@ -37,7 +37,7 @@ struct ReadingStatsView: View {
     @ViewBuilder
     private func statsContent(_ stats: ReadingStats) -> some View {
         ScrollView {
-            VStack(spacing: 24) {
+            VStack(spacing: ShelfSpacing.xxl) {
                 // Summary cards
                 summaryCards(stats)
 
@@ -67,6 +67,7 @@ struct ReadingStatsView: View {
             }
             .padding()
         }
+        .shelfPageBackground()
     }
 
     @ViewBuilder
@@ -74,38 +75,38 @@ struct ReadingStatsView: View {
         LazyVGrid(columns: [
             GridItem(.flexible()),
             GridItem(.flexible()),
-        ], spacing: 12) {
-            StatCard(label: "Total Read", value: "\(stats.totalRead)", icon: "checkmark.circle.fill", color: .green)
-            StatCard(label: "Currently Reading", value: "\(stats.totalReading)", icon: "book.fill", color: .blue)
-            StatCard(label: "Want to Read", value: "\(stats.totalWantToRead)", icon: "bookmark.fill", color: .orange)
+        ], spacing: ShelfSpacing.md) {
+            StatCard(label: "Total Read", value: "\(stats.totalRead)", icon: "checkmark.circle.fill", color: ShelfColors.forest)
+            StatCard(label: "Currently Reading", value: "\(stats.totalReading)", icon: "book.fill", color: ShelfColors.ocean)
+            StatCard(label: "Want to Read", value: "\(stats.totalWantToRead)", icon: "bookmark.fill", color: ShelfColors.amber)
 
             if let avg = stats.averageRating {
-                StatCard(label: "Avg Rating", value: String(format: "%.1f", avg), icon: "star.fill", color: .yellow)
+                StatCard(label: "Avg Rating", value: String(format: "%.1f", avg), icon: "star.fill", color: ShelfColors.starFilled)
             }
 
             if let pages = stats.currentYearStats.pagesRead {
-                StatCard(label: "Pages This Year", value: pages.formatted(), icon: "doc.text.fill", color: .purple)
+                StatCard(label: "Pages This Year", value: pages.formatted(), icon: "doc.text.fill", color: ShelfColors.plum)
             }
 
-            StatCard(label: "This Year", value: "\(stats.currentYearStats.booksRead)", icon: "calendar", color: .teal)
+            StatCard(label: "This Year", value: "\(stats.currentYearStats.booksRead)", icon: "calendar", color: ShelfColors.accent)
         }
     }
 
     @ViewBuilder
     private func monthlyChart(title: String, data: [MonthlyCount], booksRead: Int) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
             Text(title)
-                .font(.headline)
+                .font(ShelfFonts.headlineSans)
             Text("\(booksRead) books")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.caption)
+                .foregroundStyle(ShelfColors.textSecondary)
 
             Chart(data) { item in
                 BarMark(
                     x: .value("Month", monthName(item.month)),
                     y: .value("Books", item.count)
                 )
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
                             }
             .frame(height: 200)
             .chartXAxis {
@@ -116,71 +117,71 @@ struct ReadingStatsView: View {
             }
         }
         .padding()
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(ShelfColors.backgroundSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
     }
 
     @ViewBuilder
     private func ratingDistributionChart(_ distribution: [RatingDistribution]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
             Text("Rating Distribution")
-                .font(.headline)
+                .font(ShelfFonts.headlineSans)
 
             Chart(distribution) { item in
                 BarMark(
                     x: .value("Rating", String(format: "%.1f", item.rating)),
                     y: .value("Count", item.count)
                 )
-                .foregroundStyle(Color.yellow)
+                .foregroundStyle(ShelfColors.starFilled)
                             }
             .frame(height: 160)
         }
         .padding()
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(ShelfColors.backgroundSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
     }
 
     @ViewBuilder
     private func topGenresSection(_ genres: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
             Text("Top Genres")
-                .font(.headline)
+                .font(ShelfFonts.headlineSans)
 
-            FlowLayout(spacing: 6) {
+            FlowLayout(spacing: ShelfSpacing.xs) {
                 ForEach(genres, id: \.self) { genre in
                     Text(genre)
-                        .font(.caption)
+                        .font(ShelfFonts.caption)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(Color.accentColor.opacity(0.15))
+                        .background(ShelfColors.accentSubtle)
                         .clipShape(Capsule())
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(ShelfColors.backgroundSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
     }
 
     @ViewBuilder
     private func yearlyHistoryChart(_ yearlyStats: [YearlyStats]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
             Text("Yearly History")
-                .font(.headline)
+                .font(ShelfFonts.headlineSans)
 
             Chart(yearlyStats) { item in
                 BarMark(
                     x: .value("Year", String(item.year)),
                     y: .value("Books", item.booksRead)
                 )
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
                             }
             .frame(height: 160)
         }
         .padding()
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(ShelfColors.backgroundSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
     }
 
     private func monthName(_ month: Int) -> String {
@@ -204,19 +205,19 @@ struct StatCard: View {
     let color: Color
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: ShelfSpacing.sm) {
             Image(systemName: icon)
                 .font(.title2)
                 .foregroundStyle(color)
             Text(value)
-                .font(.title3.bold())
+                .font(ShelfFonts.dataSmall)
             Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.caption)
+                .foregroundStyle(ShelfColors.textSecondary)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 16)
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.vertical, ShelfSpacing.lg)
+        .background(ShelfColors.backgroundSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
     }
 }

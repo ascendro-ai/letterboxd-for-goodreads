@@ -10,7 +10,7 @@ struct StarRatingView: View {
     var maxRating: Int = 5
     var size: CGFloat = 32
     var spacing: CGFloat = 4
-    var color: Color = .yellow
+    var color: Color = ShelfColors.starFilled
 
     var body: some View {
         HStack(spacing: spacing) {
@@ -92,7 +92,7 @@ struct StarRatingDisplay: View {
     var maxRating: Int = 5
     var size: CGFloat = 14
     var spacing: CGFloat = 1
-    var color: Color = .yellow
+    var color: Color = ShelfColors.starFilled
 
     var body: some View {
         HStack(spacing: spacing) {

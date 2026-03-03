@@ -31,23 +31,28 @@ struct BarcodeScannerView: View {
 
                     if viewModel.isLookingUp {
                         ProgressView("Looking up ISBN...")
-                            .padding()
+                            .font(ShelfFonts.subheadlineSans)
+                            .foregroundStyle(ShelfColors.textPrimary)
+                            .padding(ShelfSpacing.lg)
                             .background(.ultraThinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
                     } else if let error = viewModel.error {
-                        VStack(spacing: 8) {
+                        VStack(spacing: ShelfSpacing.sm) {
                             Text(error.localizedDescription)
-                                .font(.subheadline)
+                                .font(ShelfFonts.subheadlineSans)
+                                .foregroundStyle(ShelfColors.error)
                             Button("Try Again") { viewModel.reset() }
-                                .font(.subheadline.weight(.medium))
+                                .font(ShelfFonts.subheadlineBold)
+                                .foregroundStyle(ShelfColors.accent)
                         }
-                        .padding()
+                        .padding(ShelfSpacing.lg)
                         .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
                     } else {
                         Text("Point your camera at a book's barcode")
-                            .font(.subheadline.weight(.medium))
-                            .padding(.horizontal, 20)
+                            .font(ShelfFonts.subheadlineBold)
+                            .foregroundStyle(ShelfColors.textPrimary)
+                            .padding(.horizontal, ShelfSpacing.xl)
                             .padding(.vertical, 10)
                             .background(.ultraThinMaterial)
                             .clipShape(Capsule())
@@ -58,10 +63,10 @@ struct BarcodeScannerView: View {
                         showManualEntry = true
                     } label: {
                         Text("Enter ISBN manually")
-                            .font(.subheadline)
+                            .font(ShelfFonts.subheadlineSans)
                             .foregroundStyle(.white)
                     }
-                    .padding(.top, 8)
+                    .padding(.top, ShelfSpacing.sm)
                     .padding(.bottom, 40)
                 }
             }
@@ -70,6 +75,7 @@ struct BarcodeScannerView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .foregroundStyle(ShelfColors.accent)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -77,6 +83,7 @@ struct BarcodeScannerView: View {
                         toggleTorch(viewModel.isTorchOn)
                     } label: {
                         Image(systemName: viewModel.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                            .foregroundStyle(ShelfColors.accent)
                     }
                 }
             }

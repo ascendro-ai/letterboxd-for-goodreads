@@ -48,15 +48,16 @@ struct LogBookSheet: View {
             Form {
                 // Book header
                 Section {
-                    HStack(spacing: 12) {
+                    HStack(spacing: ShelfSpacing.md) {
                         BookCoverImage(url: book.coverImageURL, size: CGSize(width: 50, height: 75))
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: ShelfSpacing.xxs) {
                             Text(book.title)
-                                .font(.headline)
+                                .font(ShelfFonts.headlineSerif)
+                                .foregroundStyle(ShelfColors.textPrimary)
                             if let author = book.authors.first?.name {
                                 Text(author)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
+                                    .font(ShelfFonts.captionSerif)
+                                    .foregroundStyle(ShelfColors.textSecondary)
                             }
                         }
                     }
@@ -76,12 +77,12 @@ struct LogBookSheet: View {
 
                 // Rating
                 Section("Rating") {
-                    VStack(spacing: 8) {
+                    VStack(spacing: ShelfSpacing.sm) {
                         StarRatingView(rating: $rating, size: 36)
                         if rating > 0 {
                             Text(String(format: "%.1f", rating))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(ShelfFonts.caption)
+                                .foregroundStyle(ShelfColors.textSecondary)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -95,8 +96,8 @@ struct LogBookSheet: View {
 
                     if rating > 0 && existingUserBook == nil && reviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text("A review is required when rating a book.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.amber)
                     }
 
                     if !reviewText.isEmpty {

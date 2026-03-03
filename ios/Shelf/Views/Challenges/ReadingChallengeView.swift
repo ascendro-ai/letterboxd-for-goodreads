@@ -29,70 +29,71 @@ struct ReadingChallengeView: View {
                 Task { await saveGoal(goalCount) }
             }
         }
+        .shelfPageBackground()
     }
 
     private var noGoalView: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: ShelfSpacing.xl) {
             Image(systemName: "target")
                 .font(.system(size: 48))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
 
             Text("Set a Reading Goal")
-                .font(.title3.bold())
+                .font(ShelfFonts.headlineSerif)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text("Challenge yourself to read more books this year.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+                .padding(.horizontal, ShelfSpacing.xxxl)
 
             Button {
                 showSetGoal = true
             } label: {
                 Text("Set Goal")
-                    .font(.body.weight(.semibold))
-                    .frame(width: 160, height: 44)
-                    .background(Color.accentColor)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shelfPrimaryButton()
             }
+            .padding(.horizontal, ShelfSpacing.page)
         }
     }
 
     @ViewBuilder
     private func challengeContent(_ challenge: ReadingChallenge) -> some View {
         ScrollView {
-            VStack(spacing: 24) {
+            VStack(spacing: ShelfSpacing.xxl) {
                 // Progress ring
-                VStack(spacing: 12) {
+                VStack(spacing: ShelfSpacing.md) {
                     ZStack {
                         Circle()
-                            .stroke(Color(.systemGray5), lineWidth: 12)
+                            .stroke(ShelfColors.backgroundTertiary, lineWidth: 12)
                             .frame(width: 120, height: 120)
                         Circle()
                             .trim(from: 0, to: challenge.progressPercent)
-                            .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 12, lineCap: .round))
+                            .stroke(ShelfColors.accent, style: StrokeStyle(lineWidth: 12, lineCap: .round))
                             .frame(width: 120, height: 120)
                             .rotationEffect(.degrees(-90))
                             .animation(.easeInOut, value: challenge.progressPercent)
                         VStack(spacing: 2) {
                             Text("\(challenge.currentCount)")
-                                .font(.title.bold())
+                                .font(ShelfFonts.dataLarge)
+                                .foregroundStyle(ShelfColors.textPrimary)
                             Text("of \(challenge.goalCount)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(ShelfFonts.caption)
+                                .foregroundStyle(ShelfColors.textSecondary)
                         }
                     }
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("\(challenge.currentCount) of \(challenge.goalCount) books read")
 
                     Text("\(challenge.currentCount) of \(challenge.goalCount) books")
-                        .font(.headline)
+                        .font(ShelfFonts.headlineSans)
+                        .foregroundStyle(ShelfColors.textPrimary)
 
                     if challenge.isComplete {
                         Label("Goal reached!", systemImage: "party.popper.fill")
-                            .font(.subheadline)
-                            .foregroundStyle(.green)
+                            .font(ShelfFonts.subheadlineSans)
+                            .foregroundStyle(ShelfColors.forest)
                     }
                 }
 
@@ -101,33 +102,36 @@ struct ReadingChallengeView: View {
                     showSetGoal = true
                 } label: {
                     Text("Edit Goal")
-                        .font(.subheadline.weight(.medium))
+                        .font(ShelfFonts.subheadlineBold)
+                        .foregroundStyle(ShelfColors.accent)
                 }
 
                 // Books list
                 if let books = challenge.books, !books.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.md) {
                         Text("Books Read")
-                            .font(.headline)
-                            .padding(.horizontal)
+                            .font(ShelfFonts.headlineSans)
+                            .foregroundStyle(ShelfColors.textPrimary)
+                            .padding(.horizontal, ShelfSpacing.lg)
                             .accessibilityAddTraits(.isHeader)
 
                         ForEach(books) { book in
-                            HStack(spacing: 12) {
+                            HStack(spacing: ShelfSpacing.md) {
                                 BookCoverImage(
                                     url: book.coverImageURL,
                                     size: CGSize(width: 40, height: 60),
                                     bookTitle: book.workTitle
                                 )
 
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: ShelfSpacing.xxs) {
                                     Text(book.workTitle)
-                                        .font(.subheadline.weight(.medium))
+                                        .font(ShelfFonts.bodySerifBold)
                                         .lineLimit(2)
+                                        .foregroundStyle(ShelfColors.textPrimary)
                                     if let author = book.authors.first {
                                         Text(author)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                            .font(ShelfFonts.captionSerif)
+                                            .foregroundStyle(ShelfColors.textSecondary)
                                     }
                                 }
 
@@ -135,19 +139,19 @@ struct ReadingChallengeView: View {
 
                                 if let finished = book.finishedAt {
                                     Text(finished, format: .dateTime.month(.abbreviated).day())
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .font(ShelfFonts.caption)
+                                        .foregroundStyle(ShelfColors.textSecondary)
                                 }
                             }
-                            .padding(.horizontal)
+                            .padding(.horizontal, ShelfSpacing.lg)
 
-                            Divider()
-                                .padding(.horizontal)
+                            ShelfDivider()
+                                .padding(.horizontal, ShelfSpacing.lg)
                         }
                     }
                 }
             }
-            .padding(.top, 16)
+            .padding(.top, ShelfSpacing.lg)
         }
     }
 

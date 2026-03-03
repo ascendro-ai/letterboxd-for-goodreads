@@ -29,11 +29,11 @@ struct UserAvatarView: View {
 
     private var placeholder: some View {
         Circle()
-            .fill(Color(.systemGray4))
+            .fill(ShelfColors.backgroundTertiary)
             .frame(width: size, height: size)
             .overlay {
                 Image(systemName: "person.fill")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ShelfColors.textTertiary)
                     .font(.system(size: size * 0.4))
             }
     }

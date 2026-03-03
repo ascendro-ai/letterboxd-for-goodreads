@@ -12,24 +12,24 @@ struct PaywallView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 24) {
+                VStack(spacing: ShelfSpacing.xxl) {
                     // Header
-                    VStack(spacing: 12) {
+                    VStack(spacing: ShelfSpacing.md) {
                         Image(systemName: "crown.fill")
                             .font(.system(size: 48))
-                            .foregroundStyle(.yellow)
+                            .foregroundStyle(ShelfColors.starFilled)
 
                         Text("Shelf Premium")
-                            .font(.title.bold())
+                            .font(ShelfFonts.displaySmall)
 
                         Text("Get the most out of your reading life")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.subheadlineSans)
+                            .foregroundStyle(ShelfColors.textSecondary)
                     }
-                    .padding(.top, 20)
+                    .padding(.top, ShelfSpacing.xl)
 
                     // Features
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.lg) {
                         PremiumFeatureRow(icon: "eye.slash", title: "Ad-free experience", description: "No ads, ever.")
                         PremiumFeatureRow(icon: "books.vertical", title: "Unlimited shelves", description: "Create as many shelves as you want.")
                         PremiumFeatureRow(icon: "chart.bar", title: "Advanced stats", description: "Deep insights into your reading habits.")
@@ -40,7 +40,7 @@ struct PaywallView: View {
 
                     // Package options
                     if let offering = subscriptionService.currentOffering {
-                        VStack(spacing: 12) {
+                        VStack(spacing: ShelfSpacing.md) {
                             ForEach(offering.availablePackages, id: \.identifier) { package in
                                 PackageOptionView(
                                     package: package,
@@ -53,7 +53,7 @@ struct PaywallView: View {
                         .padding(.horizontal)
                     } else {
                         // Fallback display when offerings haven't loaded
-                        VStack(spacing: 12) {
+                        VStack(spacing: ShelfSpacing.md) {
                             PricingCard(title: "Monthly", price: "$4.99/mo", isPopular: false, isSelected: false)
                             PricingCard(title: "Annual", price: "$39.99/yr", isPopular: true, isSelected: false)
                         }
@@ -75,35 +75,34 @@ struct PaywallView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .frame(height: 50)
-                        .background(Color.accentColor)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                    .shelfPrimaryButton()
                     .disabled(isPurchasing || selectedPackage == nil)
                     .padding(.horizontal)
 
                     if let errorMessage {
                         Text(errorMessage)
-                            .font(.caption)
-                            .foregroundStyle(.red)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.error)
                     }
 
                     // Restore
                     Button("Restore Purchases") {
                         restore()
                     }
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.subheadlineSans)
+                    .foregroundStyle(ShelfColors.textSecondary)
 
                     // Legal
                     Text("Payment will be charged to your Apple ID account. Subscription automatically renews unless cancelled at least 24 hours before the current period ends.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(ShelfFonts.caption2)
+                        .foregroundStyle(ShelfColors.textTertiary)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 20)
+                        .padding(.horizontal, ShelfSpacing.xxl)
+                        .padding(.bottom, ShelfSpacing.xl)
                 }
             }
+            .shelfPageBackground()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -170,15 +169,15 @@ struct PremiumFeatureRow: View {
         HStack(spacing: 14) {
             Image(systemName: icon)
                 .font(.title3)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
                 .frame(width: 32)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(ShelfFonts.subheadlineBold)
                 Text(description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.caption)
+                    .foregroundStyle(ShelfColors.textSecondary)
             }
         }
     }
@@ -194,21 +193,21 @@ struct PackageOptionView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(package.storeProduct.localizedTitle)
-                        .font(.subheadline.weight(.semibold))
+                        .font(ShelfFonts.subheadlineBold)
                     Text(package.storeProduct.localizedPriceString)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.textSecondary)
                 }
                 Spacer()
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .foregroundStyle(isSelected ? ShelfColors.accent : ShelfColors.textSecondary)
             }
             .padding()
-            .background(isSelected ? Color.accentColor.opacity(0.1) : Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .background(isSelected ? ShelfColors.accentSubtle : ShelfColors.backgroundSecondary)
+            .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+                RoundedRectangle(cornerRadius: ShelfRadius.large)
+                    .stroke(isSelected ? ShelfColors.accent : .clear, lineWidth: 2)
             )
         }
         .buttonStyle(.plain)
@@ -224,29 +223,29 @@ struct PricingCard: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+                HStack(spacing: ShelfSpacing.xs) {
                     Text(title)
-                        .font(.subheadline.weight(.semibold))
+                        .font(ShelfFonts.subheadlineBold)
                     if isPopular {
                         Text("Best Value")
-                            .font(.caption2.weight(.bold))
-                            .padding(.horizontal, 6)
+                            .font(ShelfFonts.captionBold)
+                            .padding(.horizontal, ShelfSpacing.xs)
                             .padding(.vertical, 2)
-                            .background(Color.accentColor)
+                            .background(ShelfColors.accent)
                             .foregroundStyle(.white)
                             .clipShape(Capsule())
                     }
                 }
                 Text(price)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.caption)
+                    .foregroundStyle(ShelfColors.textSecondary)
             }
             Spacer()
             Image(systemName: "circle")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(ShelfColors.textSecondary)
         }
         .padding()
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(ShelfColors.backgroundSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
     }
 }

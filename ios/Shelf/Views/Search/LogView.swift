@@ -8,17 +8,18 @@ struct LogView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !viewModel.hasSearched && viewModel.results.isEmpty {
-                VStack(spacing: 16) {
+                VStack(spacing: ShelfSpacing.lg) {
                     Image(systemName: "plus.circle")
                         .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(ShelfColors.textTertiary)
 
                     Text("Log a Book")
-                        .font(.title3.weight(.semibold))
+                        .font(ShelfFonts.headlineSans)
+                        .foregroundStyle(ShelfColors.textPrimary)
 
                     Text("Search for a book to rate, review, or add to your shelf.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(ShelfFonts.subheadlineSans)
+                        .foregroundStyle(ShelfColors.textSecondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
                 }
@@ -35,10 +36,13 @@ struct LogView: View {
                         BookCard(book: book, size: .medium)
                     }
                     .buttonStyle(.plain)
+                    .listRowBackground(ShelfColors.background)
                 }
                 .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
         }
+        .shelfPageBackground()
         .navigationTitle("Log")
         .searchable(text: $viewModel.query, prompt: "Search for a book...")
         .onChange(of: viewModel.query) {

@@ -14,6 +14,9 @@ struct ShelfApp: App {
         AnalyticsService.configure()
         SubscriptionService.shared.configure()
         AdService.shared.configure()
+
+        // Configure global appearance
+        configureAppearance()
     }
 
     var body: some Scene {
@@ -53,6 +56,40 @@ struct ShelfApp: App {
                     }
                 }
         }
+    }
+
+    private func configureAppearance() {
+        // Tab bar
+        let tabAppearance = UITabBarAppearance()
+        tabAppearance.configureWithOpaqueBackground()
+        tabAppearance.backgroundColor = UIColor(ShelfColors.surface)
+        tabAppearance.stackedLayoutAppearance.selected.iconColor = UIColor(ShelfColors.accent)
+        tabAppearance.stackedLayoutAppearance.selected.titleTextAttributes = [
+            .foregroundColor: UIColor(ShelfColors.accent)
+        ]
+        tabAppearance.stackedLayoutAppearance.normal.iconColor = UIColor(ShelfColors.textTertiary)
+        tabAppearance.stackedLayoutAppearance.normal.titleTextAttributes = [
+            .foregroundColor: UIColor(ShelfColors.textTertiary)
+        ]
+        UITabBar.appearance().standardAppearance = tabAppearance
+        UITabBar.appearance().scrollEdgeAppearance = tabAppearance
+
+        // Navigation bar
+        let navAppearance = UINavigationBarAppearance()
+        navAppearance.configureWithOpaqueBackground()
+        navAppearance.backgroundColor = UIColor(ShelfColors.background)
+        navAppearance.titleTextAttributes = [
+            .foregroundColor: UIColor(ShelfColors.textPrimary)
+        ]
+        navAppearance.largeTitleTextAttributes = [
+            .foregroundColor: UIColor(ShelfColors.textPrimary)
+        ]
+        UINavigationBar.appearance().standardAppearance = navAppearance
+        UINavigationBar.appearance().scrollEdgeAppearance = navAppearance
+        UINavigationBar.appearance().tintColor = UIColor(ShelfColors.accent)
+
+        // Table/List separator
+        UITableView.appearance().separatorColor = UIColor(ShelfColors.divider)
     }
 }
 
@@ -121,14 +158,16 @@ struct RootView: View {
 struct LaunchScreen: View {
     var body: some View {
         ZStack {
-            Color(.systemBackground)
+            ShelfColors.background
                 .ignoresSafeArea()
-            VStack(spacing: 12) {
+            VStack(spacing: ShelfSpacing.md) {
                 Image(systemName: "books.vertical.fill")
                     .font(.system(size: 48))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(ShelfColors.accent)
+                    .symbolEffect(.pulse)
                 Text("Shelf")
-                    .font(.title.bold())
+                    .font(ShelfFonts.displayLarge)
+                    .foregroundStyle(ShelfColors.textPrimary)
             }
         }
     }

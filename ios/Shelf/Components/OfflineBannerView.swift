@@ -29,9 +29,9 @@ struct OfflineBannerView: View {
                     }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color.orange)
+            .padding(.horizontal, ShelfSpacing.lg)
+            .padding(.vertical, ShelfSpacing.sm)
+            .background(ShelfColors.amber)
             .foregroundStyle(.white)
             .accessibilityElement(children: .combine)
             .accessibilityLabel("You're offline. \(syncService.isSyncing ? "Syncing changes." : "")")

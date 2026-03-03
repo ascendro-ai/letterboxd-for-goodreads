@@ -15,34 +15,36 @@ struct ManualISBNEntryView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
+            VStack(spacing: ShelfSpacing.xxl) {
                 Image(systemName: "number")
                     .font(.system(size: 40))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(ShelfColors.accent)
 
                 Text("Enter ISBN")
-                    .font(.title3.bold())
+                    .font(ShelfFonts.headlineSans)
+                    .foregroundStyle(ShelfColors.textPrimary)
 
                 Text("Type the 10 or 13 digit ISBN found on the back cover of the book.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.subheadlineSans)
+                    .foregroundStyle(ShelfColors.textSecondary)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
+                    .padding(.horizontal, ShelfSpacing.xxxl)
 
                 TextField("ISBN", text: $isbn)
                     .keyboardType(.numberPad)
                     .textContentType(.none)
                     .font(.title3.monospacedDigit())
+                    .foregroundStyle(ShelfColors.textPrimary)
                     .multilineTextAlignment(.center)
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .padding(.horizontal, 32)
+                    .padding(ShelfSpacing.lg)
+                    .background(ShelfColors.backgroundSecondary)
+                    .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
+                    .padding(.horizontal, ShelfSpacing.xxxl)
 
                 if !isbn.isEmpty && !isValidISBN {
                     Text("Invalid ISBN format")
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.error)
                 }
 
                 Button {
@@ -50,35 +52,38 @@ struct ManualISBNEntryView: View {
                 } label: {
                     if isLookingUp {
                         ProgressView()
+                            .tint(.white)
                             .frame(maxWidth: .infinity)
                             .frame(height: 48)
                     } else {
                         Text("Look Up")
-                            .font(.body.weight(.semibold))
+                            .font(ShelfFonts.bodySansBold)
                             .frame(maxWidth: .infinity)
                             .frame(height: 48)
                     }
                 }
-                .background(isValidISBN ? Color.accentColor : Color(.systemGray4))
+                .background(isValidISBN ? ShelfColors.accent : ShelfColors.backgroundTertiary)
                 .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
                 .disabled(!isValidISBN || isLookingUp)
-                .padding(.horizontal, 32)
+                .padding(.horizontal, ShelfSpacing.xxxl)
 
                 if let error {
                     Text(error.localizedDescription)
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.error)
                 }
 
                 Spacer()
             }
-            .padding(.top, 32)
+            .padding(.top, ShelfSpacing.xxxl)
+            .shelfPageBackground()
             .navigationTitle("Manual Entry")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .foregroundStyle(ShelfColors.accent)
                 }
             }
         }

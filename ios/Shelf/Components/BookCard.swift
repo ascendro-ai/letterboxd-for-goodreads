@@ -18,20 +18,20 @@ struct BookCard: View {
                 if let authorName = book.authors.first?.name {
                     Text(authorName)
                         .font(size.subtitleFont)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ShelfColors.textSecondary)
                         .lineLimit(1)
                 }
 
                 if showRating, let rating = book.averageRating {
-                    HStack(spacing: 4) {
+                    HStack(spacing: ShelfSpacing.xxs) {
                         StarRatingDisplay(rating: rating, size: size.starSize)
                         Text(String(format: "%.1f", rating))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textSecondary)
                         if let count = book.ratingsCount, count > 0 {
                             Text("(\(count.formatted()))")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .font(ShelfFonts.caption2)
+                                .foregroundStyle(ShelfColors.textTertiary)
                         }
                     }
                 }
@@ -67,17 +67,17 @@ enum BookCardSize {
 
     var titleFont: Font {
         switch self {
-        case .small: .subheadline
-        case .medium: .headline
-        case .large: .title3
+        case .small: ShelfFonts.subheadlineBold
+        case .medium: ShelfFonts.headlineSerif
+        case .large: ShelfFonts.displaySmall
         }
     }
 
     var subtitleFont: Font {
         switch self {
-        case .small: .caption
-        case .medium: .subheadline
-        case .large: .body
+        case .small: ShelfFonts.caption
+        case .medium: ShelfFonts.captionSerif
+        case .large: ShelfFonts.bodySerif
         }
     }
 

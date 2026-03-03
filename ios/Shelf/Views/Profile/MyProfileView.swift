@@ -10,7 +10,7 @@ struct MyProfileView: View {
             .navigationTitle("Profile")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: ShelfSpacing.md) {
                         NavigationLink {
                             ReadingStatsView()
                         } label: {
@@ -63,43 +63,45 @@ struct ProfileContentView: View {
                 }
             } else if let profile = viewModel.profile {
                 profileContent(profile)
+            } else {
+                // Fallback: no state matched — trigger load
+                LoadingStateView()
+                    .task { await viewModel.load() }
             }
         }
         .task {
-            if viewModel.profile == nil {
-                await viewModel.load()
-            }
+            await viewModel.load()
         }
     }
 
     @ViewBuilder
     private func profileContent(_ profile: UserProfile) -> some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(spacing: ShelfSpacing.xl) {
                 // Avatar + name
-                VStack(spacing: 10) {
+                VStack(spacing: ShelfSpacing.sm) {
                     UserAvatarView(url: profile.user.avatarURL, size: 80)
 
-                    VStack(spacing: 4) {
+                    VStack(spacing: ShelfSpacing.xxs) {
                         if let displayName = profile.user.displayName {
                             Text(displayName)
-                                .font(.title3.bold())
+                                .font(ShelfFonts.headlineSerif)
                         }
                         Text("@\(profile.user.username)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.subheadlineSans)
+                            .foregroundStyle(ShelfColors.textSecondary)
                     }
 
                     if let bio = profile.user.bio, !bio.isEmpty {
                         Text(bio)
-                            .font(.subheadline)
+                            .font(ShelfFonts.captionSerif)
                             .multilineTextAlignment(.center)
-                            .padding(.horizontal, 32)
+                            .padding(.horizontal, ShelfSpacing.xxxl)
                     }
                 }
 
                 // Stats
-                HStack(spacing: 32) {
+                HStack(spacing: ShelfSpacing.xxxl) {
                     StatColumn(value: profile.booksCount, label: "Books")
                     StatColumn(value: profile.followersCount, label: "Followers")
                     StatColumn(value: profile.followingCount, label: "Following")
@@ -111,34 +113,34 @@ struct ProfileContentView: View {
                         Task { try? await viewModel.toggleFollow() }
                     } label: {
                         Text(profile.isFollowing == true ? "Following" : "Follow")
-                            .font(.subheadline.weight(.semibold))
+                            .font(ShelfFonts.subheadlineBold)
                             .frame(width: 120, height: 36)
-                            .background(profile.isFollowing == true ? Color(.systemGray5) : Color.accentColor)
-                            .foregroundStyle(profile.isFollowing == true ? Color.primary : Color.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .background(profile.isFollowing == true ? ShelfColors.backgroundTertiary : ShelfColors.accent)
+                            .foregroundStyle(profile.isFollowing == true ? ShelfColors.textPrimary : Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.medium))
                     }
                 }
 
                 // Favorite books
                 if let favorites = profile.user.favoriteBooks, !favorites.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
                         Text("Favorite Books")
-                            .font(.headline)
+                            .font(ShelfFonts.headlineSans)
                             .padding(.horizontal)
 
                         // TODO: Fetch book details for favorite UUIDs
                         Text("\(favorites.count) favorites selected")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textSecondary)
                             .padding(.horizontal)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Status filter
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: ShelfSpacing.md) {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
+                        HStack(spacing: ShelfSpacing.sm) {
                             StatusFilterChip(title: "All", isSelected: viewModel.selectedStatus == nil) {
                                 Task { await viewModel.filterBooks(by: nil) }
                             }
@@ -157,10 +159,10 @@ struct ProfileContentView: View {
                     // Books list
                     if viewModel.books.isEmpty {
                         Text("No books yet")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.subheadlineSans)
+                            .foregroundStyle(ShelfColors.textSecondary)
                             .frame(maxWidth: .infinity)
-                            .padding(.top, 20)
+                            .padding(.top, ShelfSpacing.xl)
                     } else {
                         LazyVStack(spacing: 0) {
                             ForEach(viewModel.books) { userBook in
@@ -168,10 +170,10 @@ struct ProfileContentView: View {
                                     NavigationLink(value: book) {
                                         BookCard(book: book, size: .medium)
                                             .padding(.horizontal)
-                                            .padding(.vertical, 8)
+                                            .padding(.vertical, ShelfSpacing.sm)
                                     }
                                     .buttonStyle(.plain)
-                                    Divider().padding(.horizontal)
+                                    ShelfDivider().padding(.horizontal)
                                 }
                             }
                         }
@@ -180,9 +182,9 @@ struct ProfileContentView: View {
 
                 // Shelves
                 if !viewModel.shelves.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.md) {
                         Text("Shelves")
-                            .font(.headline)
+                            .font(ShelfFonts.headlineSans)
                             .padding(.horizontal)
 
                         ForEach(viewModel.shelves) { shelf in
@@ -192,33 +194,34 @@ struct ProfileContentView: View {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(shelf.name)
-                                            .font(.subheadline.weight(.medium))
+                                            .font(ShelfFonts.subheadlineBold)
                                         if let count = shelf.booksCount {
                                             Text("\(count) books")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                                                .font(ShelfFonts.caption)
+                                                .foregroundStyle(ShelfColors.textSecondary)
                                         }
                                     }
                                     Spacer()
                                     if !shelf.isPublic {
                                         Image(systemName: "lock.fill")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                            .font(ShelfFonts.caption)
+                                            .foregroundStyle(ShelfColors.textSecondary)
                                     }
                                     Image(systemName: "chevron.right")
-                                        .font(.caption)
-                                        .foregroundStyle(.tertiary)
+                                        .font(ShelfFonts.caption)
+                                        .foregroundStyle(ShelfColors.textTertiary)
                                 }
                                 .padding(.horizontal)
-                                .padding(.vertical, 6)
+                                .padding(.vertical, ShelfSpacing.xs)
                             }
                             .buttonStyle(.plain)
                         }
                     }
                 }
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, ShelfSpacing.xxl)
         }
+        .shelfPageBackground()
         .navigationDestination(for: Book.self) { book in
             BookDetailView(bookID: book.id)
         }
@@ -234,10 +237,10 @@ struct StatColumn: View {
     var body: some View {
         VStack(spacing: 2) {
             Text("\(value)")
-                .font(.headline)
+                .font(ShelfFonts.dataSmall)
             Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.caption)
+                .foregroundStyle(ShelfColors.textSecondary)
         }
     }
 }
@@ -250,11 +253,11 @@ struct StatusFilterChip: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.subheadline.weight(.medium))
+                .font(ShelfFonts.subheadlineBold)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(isSelected ? Color.accentColor : Color(.systemGray5))
-                .foregroundStyle(isSelected ? .white : .primary)
+                .background(isSelected ? ShelfColors.accent : ShelfColors.backgroundTertiary)
+                .foregroundStyle(isSelected ? .white : ShelfColors.textPrimary)
                 .clipShape(Capsule())
         }
     }

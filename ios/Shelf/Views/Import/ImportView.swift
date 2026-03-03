@@ -8,14 +8,14 @@ struct ImportView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
+            VStack(spacing: ShelfSpacing.xxl) {
                 if let status = viewModel.importStatus {
                     importProgressView(status)
                 } else {
                     importSetupView
                 }
             }
-            .padding(24)
+            .padding(ShelfSpacing.xxl)
             .navigationTitle("Import Library")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -24,23 +24,27 @@ struct ImportView: View {
                         viewModel.stopPolling()
                         dismiss()
                     }
+                    .font(ShelfFonts.bodySans)
+                    .foregroundStyle(ShelfColors.accent)
                 }
             }
+            .shelfPageBackground()
         }
     }
 
     private var importSetupView: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: ShelfSpacing.xxl) {
             Image(systemName: "square.and.arrow.down")
                 .font(.system(size: 48))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
 
             Text("Import your books")
-                .font(.title3.bold())
+                .font(ShelfFonts.headlineSerif)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text("Upload your library export from Goodreads or StoryGraph. We'll match your books and import your ratings, reviews, and shelves.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
 
             // Source picker
@@ -56,23 +60,19 @@ struct ImportView: View {
                 showFilePicker = true
             } label: {
                 Label(filePickerLabel, systemImage: "doc")
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 48)
-                    .background(Color.accentColor)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shelfPrimaryButton()
             }
             .disabled(viewModel.isUploading)
 
             if viewModel.isUploading {
                 ProgressView("Uploading...")
+                    .foregroundStyle(ShelfColors.textSecondary)
             }
 
             if let error = viewModel.error {
                 Text(error.localizedDescription)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                    .font(ShelfFonts.caption)
+                    .foregroundStyle(ShelfColors.error)
             }
 
             Spacer()
@@ -88,7 +88,7 @@ struct ImportView: View {
 
     @ViewBuilder
     private func importProgressView(_ status: ImportStatus) -> some View {
-        VStack(spacing: 20) {
+        VStack(spacing: ShelfSpacing.xl) {
             Spacer()
 
             // Status icon
@@ -100,39 +100,40 @@ struct ImportView: View {
                 case .completed:
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 48))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(ShelfColors.forest)
                 case .failed:
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 48))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(ShelfColors.error)
                 }
             }
 
             Text(statusTitle(status))
-                .font(.title3.bold())
+                .font(ShelfFonts.headlineSerif)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             // Progress bar
             if status.status == .processing {
-                VStack(spacing: 8) {
+                VStack(spacing: ShelfSpacing.sm) {
                     ProgressView(value: Double(status.progressPercent), total: 100)
-                        .tint(.accentColor)
+                        .tint(ShelfColors.accent)
 
                     Text("\(status.progressPercent)%")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.textSecondary)
                 }
             }
 
             // Stats
-            VStack(spacing: 8) {
+            VStack(spacing: ShelfSpacing.sm) {
                 statRow("Total books", value: status.totalBooks)
                 statRow("Matched", value: status.matched)
                 statRow("Needs review", value: status.needsReview)
                 statRow("Unmatched", value: status.unmatched)
             }
-            .padding()
-            .background(Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(ShelfSpacing.lg)
+            .background(ShelfColors.backgroundSecondary)
+            .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.large))
 
             Spacer()
 
@@ -141,12 +142,9 @@ struct ImportView: View {
                     viewModel.stopPolling()
                     dismiss()
                 }
-                .font(.body.weight(.semibold))
+                .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(Color.accentColor)
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .shelfPrimaryButton()
             }
         }
     }
@@ -154,11 +152,12 @@ struct ImportView: View {
     private func statRow(_ label: String, value: Int) -> some View {
         HStack {
             Text(label)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
             Spacer()
             Text("\(value)")
-                .font(.subheadline.weight(.semibold))
+                .font(ShelfFonts.subheadlineBold)
+                .foregroundStyle(ShelfColors.textPrimary)
         }
     }
 

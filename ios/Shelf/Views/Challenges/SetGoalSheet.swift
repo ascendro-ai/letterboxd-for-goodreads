@@ -18,34 +18,36 @@ struct SetGoalSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 32) {
+            VStack(spacing: ShelfSpacing.xxxl) {
                 Spacer()
 
                 Text(String(year))
-                    .font(.title.bold())
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.displaySmall)
+                    .foregroundStyle(ShelfColors.textSecondary)
 
                 Text("Reading Challenge")
-                    .font(.title2.bold())
+                    .font(ShelfFonts.displayMedium)
+                    .foregroundStyle(ShelfColors.textPrimary)
 
                 Text("How many books do you want to read?")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.subheadlineSans)
+                    .foregroundStyle(ShelfColors.textSecondary)
 
                 // Goal picker
-                HStack(spacing: 20) {
+                HStack(spacing: ShelfSpacing.xl) {
                     Button {
                         if goalCount > 1 { goalCount -= 1 }
                     } label: {
                         Image(systemName: "minus.circle.fill")
                             .font(.title2)
-                            .foregroundStyle(goalCount > 1 ? Color.accentColor : Color(.systemGray4))
+                            .foregroundStyle(goalCount > 1 ? ShelfColors.accent : ShelfColors.backgroundTertiary)
                     }
                     .disabled(goalCount <= 1)
                     .accessibilityLabel("Decrease goal")
 
                     Text("\(goalCount)")
                         .font(.system(size: 48, weight: .bold, design: .rounded))
+                        .foregroundStyle(ShelfColors.textPrimary)
                         .frame(minWidth: 80)
                         .accessibilityLabel("\(goalCount) books")
 
@@ -54,15 +56,15 @@ struct SetGoalSheet: View {
                     } label: {
                         Image(systemName: "plus.circle.fill")
                             .font(.title2)
-                            .foregroundStyle(goalCount < 999 ? Color.accentColor : Color(.systemGray4))
+                            .foregroundStyle(goalCount < 999 ? ShelfColors.accent : ShelfColors.backgroundTertiary)
                     }
                     .disabled(goalCount >= 999)
                     .accessibilityLabel("Increase goal")
                 }
 
                 Text("\(goalCount) book\(goalCount == 1 ? "" : "s")")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.subheadlineSans)
+                    .foregroundStyle(ShelfColors.textSecondary)
 
                 Spacer()
 
@@ -71,20 +73,18 @@ struct SetGoalSheet: View {
                     dismiss()
                 } label: {
                     Text(existingGoal != nil ? "Update Goal" : "Set Goal")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 48)
-                        .background(Color.accentColor)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shelfPrimaryButton()
                 }
-                .padding(.horizontal)
+                .padding(.horizontal, ShelfSpacing.lg)
             }
-            .padding(24)
+            .padding(ShelfSpacing.xxl)
+            .shelfPageBackground()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .font(ShelfFonts.bodySans)
+                        .foregroundStyle(ShelfColors.accent)
                 }
             }
         }

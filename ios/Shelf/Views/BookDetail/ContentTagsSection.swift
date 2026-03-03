@@ -70,10 +70,11 @@ struct ContentTagsSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
             HStack {
                 Text("Content Tags")
-                    .font(.headline)
+                    .font(ShelfFonts.headlineSans)
+                    .foregroundStyle(ShelfColors.textPrimary)
                     .accessibilityAddTraits(.isHeader)
 
                 Spacer()
@@ -82,16 +83,17 @@ struct ContentTagsSection: View {
                     showTagPicker = true
                 } label: {
                     Label("Add Tag", systemImage: "plus.circle")
-                        .font(.subheadline)
+                        .font(ShelfFonts.subheadlineSans)
+                        .foregroundStyle(ShelfColors.accent)
                 }
             }
 
             if viewModel.tags.isEmpty {
                 Text("No tags yet. Be the first to add one!")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.caption)
+                    .foregroundStyle(ShelfColors.textSecondary)
             } else {
-                FlowLayout(spacing: 6) {
+                FlowLayout(spacing: ShelfSpacing.xs) {
                     ForEach(viewModel.tags) { tag in
                         TagChip(tag: tag)
                     }
@@ -115,17 +117,18 @@ struct TagChip: View {
     let tag: ContentTag
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: ShelfSpacing.xxs) {
             if tag.isContentWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .font(ShelfFonts.caption2)
+                    .foregroundStyle(ShelfColors.amber)
             }
             Text(tag.displayName)
-                .font(.caption)
+                .font(ShelfFonts.caption)
+                .foregroundStyle(ShelfColors.textPrimary)
             Text("\(tag.voteCount)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.caption2)
+                .foregroundStyle(ShelfColors.textSecondary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -133,7 +136,7 @@ struct TagChip: View {
         .clipShape(Capsule())
         .overlay(
             tag.isConfirmed
-                ? Capsule().stroke(Color.accentColor, lineWidth: 1)
+                ? Capsule().stroke(ShelfColors.accent, lineWidth: 1)
                 : nil
         )
         .accessibilityElement(children: .ignore)
@@ -142,9 +145,9 @@ struct TagChip: View {
 
     private var chipColor: Color {
         if tag.isContentWarning {
-            return Color.orange.opacity(0.12)
+            return ShelfColors.amber.opacity(0.12)
         }
-        return Color(.systemGray5)
+        return ShelfColors.backgroundTertiary
     }
 }
 
@@ -176,6 +179,8 @@ struct TagPickerSheet: View {
                             }
                         }
                     }
+                    .scrollContentBackground(.hidden)
+                    .background(ShelfColors.background)
                     .searchable(text: $searchText, prompt: "Search tags")
                 } else {
                     LoadingStateView()
@@ -223,14 +228,15 @@ struct TagPickerSheet: View {
             HStack {
                 if type == "content_warning" {
                     Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                        .font(.caption)
+                        .foregroundStyle(ShelfColors.amber)
+                        .font(ShelfFonts.caption)
                 }
                 Text(displayName)
+                    .foregroundStyle(ShelfColors.textPrimary)
                 Spacer()
                 if alreadyVoted {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(ShelfColors.accent)
                 }
             }
         }

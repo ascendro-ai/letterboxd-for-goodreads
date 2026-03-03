@@ -19,21 +19,21 @@ struct SettingsView: View {
                     Button {
                         showPaywall = true
                     } label: {
-                        HStack(spacing: 12) {
+                        HStack(spacing: ShelfSpacing.md) {
                             Image(systemName: "crown.fill")
-                                .foregroundStyle(.yellow)
+                                .foregroundStyle(ShelfColors.starFilled)
                                 .font(.title3)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Shelf Premium")
-                                    .font(.subheadline.weight(.semibold))
+                                    .font(ShelfFonts.subheadlineBold)
                                 Text("Ad-free, unlimited shelves, and more")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .font(ShelfFonts.caption)
+                                    .foregroundStyle(ShelfColors.textSecondary)
                             }
                             Spacer()
                             Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
+                                .font(ShelfFonts.caption)
+                                .foregroundStyle(ShelfColors.textTertiary)
                         }
                     }
                     .buttonStyle(.plain)
@@ -102,14 +102,16 @@ struct SettingsView: View {
                     AnalyticsService.resetUser()
                     auth.signOut()
                 }
-                .foregroundStyle(.red)
+                .foregroundStyle(ShelfColors.error)
 
                 Button("Delete Account") {
                     showDeleteConfirmation = true
                 }
-                .foregroundStyle(.red)
+                .foregroundStyle(ShelfColors.error)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(ShelfColors.background)
         .navigationTitle("Settings")
         .confirmationDialog("Delete Account", isPresented: $showDeleteConfirmation) {
             Button("Delete Account", role: .destructive) {

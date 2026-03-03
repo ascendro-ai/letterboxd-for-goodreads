@@ -10,15 +10,15 @@ struct SeriesBadge: View {
         NavigationLink {
             SeriesDetailView(seriesID: series.id, seriesName: series.name)
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: ShelfSpacing.xxs) {
                 Image(systemName: "books.vertical")
-                    .font(.caption2)
+                    .font(ShelfFonts.caption2)
                 Text("Book \(positionText) of \(series.name)")
-                    .font(.caption)
+                    .font(ShelfFonts.caption)
                 Image(systemName: "chevron.right")
-                    .font(.caption2)
+                    .font(ShelfFonts.caption2)
             }
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ShelfColors.textSecondary)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Book \(positionText) of the series \(series.name). Tap to view series.")

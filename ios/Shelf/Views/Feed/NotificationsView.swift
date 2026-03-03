@@ -21,6 +21,7 @@ struct NotificationsView: View {
                 notificationsList
             }
         }
+        .shelfPageBackground()
         .navigationTitle("Notifications")
         .task {
             if viewModel.notifications.isEmpty {
@@ -36,7 +37,7 @@ struct NotificationsView: View {
                     Button("Mark all read") {
                         Task { await viewModel.markAllRead() }
                     }
-                    .font(.subheadline)
+                    .font(ShelfFonts.subheadlineSans)
                 }
             }
         }
@@ -44,33 +45,35 @@ struct NotificationsView: View {
 
     private var notificationsList: some View {
         List(viewModel.notifications) { notification in
-            HStack(spacing: 12) {
+            HStack(spacing: ShelfSpacing.md) {
                 if let actor = notification.actor {
                     UserAvatarView(url: actor.avatarURL, size: 36)
                 } else {
                     Image(systemName: "bell.fill")
                         .font(.body)
-                        .foregroundStyle(notification.isRead ? Color.secondary : Color.accentColor)
+                        .foregroundStyle(notification.isRead ? ShelfColors.textSecondary : ShelfColors.accent)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: ShelfSpacing.xxs) {
                     Text(notification.title)
-                        .font(.subheadline.weight(notification.isRead ? .regular : .semibold))
+                        .font(notification.isRead ? ShelfFonts.subheadlineSans : ShelfFonts.subheadlineBold)
+                        .foregroundStyle(ShelfColors.textPrimary)
 
                     if !notification.body.isEmpty {
                         Text(notification.body)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textSecondary)
                             .lineLimit(2)
                     }
 
                     Text(notification.createdAt.feedTimestamp)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(ShelfFonts.caption2)
+                        .foregroundStyle(ShelfColors.textTertiary)
                 }
             }
-            .listRowBackground(notification.isRead ? Color.clear : Color.accentColor.opacity(0.05))
+            .listRowBackground(notification.isRead ? Color.clear : ShelfColors.accentSubtle)
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
     }
 }

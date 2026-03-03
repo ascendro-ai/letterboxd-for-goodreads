@@ -24,13 +24,13 @@ struct FavoriteBooksPickerView: View {
             VStack(spacing: 0) {
                 // Selected favorites
                 if !selectedBooks.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
                         Text("Your Favorites (\(selectedBooks.count)/\(maxFavorites))")
-                            .font(.subheadline.weight(.semibold))
+                            .font(ShelfFonts.subheadlineBold)
                             .padding(.horizontal)
 
                         ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 12) {
+                            HStack(spacing: ShelfSpacing.md) {
                                 ForEach(selectedBooks) { book in
                                     FavoriteBookChip(book: book) {
                                         selectedBooks.removeAll { $0.id == book.id }
@@ -40,8 +40,8 @@ struct FavoriteBooksPickerView: View {
                             .padding(.horizontal)
                         }
                     }
-                    .padding(.vertical, 12)
-                    .background(Color(.systemGray6))
+                    .padding(.vertical, ShelfSpacing.md)
+                    .background(ShelfColors.backgroundSecondary)
                 }
 
                 // Search results
@@ -59,17 +59,17 @@ struct FavoriteBooksPickerView: View {
                             Button {
                                 toggleBook(book)
                             } label: {
-                                HStack(spacing: 12) {
+                                HStack(spacing: ShelfSpacing.md) {
                                     BookCoverImage(url: book.coverImageURL, size: CGSize(width: 40, height: 60))
 
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(book.title)
-                                            .font(.subheadline.weight(.medium))
+                                            .font(ShelfFonts.subheadlineBold)
                                             .lineLimit(2)
                                         if let author = book.authors.first?.name {
                                             Text(author)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                                                .font(ShelfFonts.caption)
+                                                .foregroundStyle(ShelfColors.textSecondary)
                                         }
                                     }
 
@@ -77,7 +77,7 @@ struct FavoriteBooksPickerView: View {
 
                                     if selectedBooks.contains(where: { $0.id == book.id }) {
                                         Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(Color.accentColor)
+                                            .foregroundStyle(ShelfColors.accent)
                                     }
                                 }
                             }
@@ -86,6 +86,8 @@ struct FavoriteBooksPickerView: View {
                     }
                 }
                 .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(ShelfColors.background)
             }
             .searchable(text: $searchQuery, prompt: "Search for your favorite books...")
             .onChange(of: searchQuery) {
@@ -141,13 +143,13 @@ struct FavoriteBookChip: View {
     let onRemove: () -> Void
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: ShelfSpacing.xxs) {
             ZStack(alignment: .topTrailing) {
                 BookCoverImage(url: book.coverImageURL, size: CGSize(width: 60, height: 90))
 
                 Button(action: onRemove) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
+                        .font(ShelfFonts.caption)
                         .foregroundStyle(.white)
                         .background(Circle().fill(.black.opacity(0.6)))
                 }
@@ -155,7 +157,7 @@ struct FavoriteBookChip: View {
             }
 
             Text(book.title)
-                .font(.caption2)
+                .font(ShelfFonts.caption2)
                 .lineLimit(1)
                 .frame(width: 60)
         }

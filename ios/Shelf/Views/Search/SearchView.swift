@@ -11,20 +11,26 @@ struct SearchView: View {
                 HStack {
                     Spacer()
                     ProgressView()
+                        .tint(ShelfColors.accent)
                     Spacer()
                 }
                 .listRowSeparator(.hidden)
+                .listRowBackground(ShelfColors.background)
             } else if viewModel.hasSearched && viewModel.results.isEmpty {
                 ContentUnavailableView.search(text: viewModel.query)
+                    .listRowBackground(ShelfColors.background)
             } else {
                 ForEach(viewModel.results) { book in
                     NavigationLink(value: book) {
                         BookCard(book: book, size: .medium)
                     }
+                    .listRowBackground(ShelfColors.background)
                 }
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .shelfPageBackground()
         .searchable(text: $viewModel.query, prompt: "Search books, authors...")
         .onChange(of: viewModel.query) {
             viewModel.search()
@@ -39,6 +45,7 @@ struct SearchView: View {
                     showScanner = true
                 } label: {
                     Image(systemName: "barcode.viewfinder")
+                        .foregroundStyle(ShelfColors.accent)
                 }
                 .accessibilityLabel("Scan barcode")
             }

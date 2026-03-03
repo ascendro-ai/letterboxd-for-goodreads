@@ -20,21 +20,21 @@ struct ContentView: View {
 
         var icon: String {
             switch self {
-            case .feed: "house"
+            case .feed: "book"
             case .search: "magnifyingglass"
-            case .log: "plus.circle"
+            case .log: "square.and.pencil"
             case .notifications: "bell"
-            case .profile: "person"
+            case .profile: "person.crop.rectangle.stack"
             }
         }
 
         var selectedIcon: String {
             switch self {
-            case .feed: "house.fill"
+            case .feed: "book.fill"
             case .search: "magnifyingglass"
-            case .log: "plus.circle.fill"
+            case .log: "square.and.pencil"
             case .notifications: "bell.fill"
-            case .profile: "person.fill"
+            case .profile: "person.crop.rectangle.stack.fill"
             }
         }
     }
@@ -52,6 +52,7 @@ struct ContentView: View {
                         .tag(tab)
                 }
             }
+            .tint(ShelfColors.accent)
         }
         .onChange(of: deepLinkHandler.pendingBookID) { _, bookID in
             if let bookID {

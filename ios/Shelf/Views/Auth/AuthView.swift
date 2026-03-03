@@ -10,24 +10,25 @@ struct AuthView: View {
                 Spacer()
 
                 // Logo + tagline
-                VStack(spacing: 12) {
+                VStack(spacing: ShelfSpacing.md) {
                     Image(systemName: "books.vertical.fill")
                         .font(.system(size: 64))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(ShelfColors.accent)
 
                     Text("Shelf")
-                        .font(.largeTitle.bold())
+                        .font(ShelfFonts.displayLarge)
+                        .foregroundStyle(ShelfColors.textPrimary)
 
                     Text("Track what you read.\nSee what friends are reading.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(ShelfFonts.subheadlineSans)
+                        .foregroundStyle(ShelfColors.textSecondary)
                         .multilineTextAlignment(.center)
                 }
 
                 Spacer()
 
                 // Auth buttons
-                VStack(spacing: 12) {
+                VStack(spacing: ShelfSpacing.md) {
                     SignInWithAppleButton(.signIn) { request in
                         request.requestedScopes = [.email, .fullName]
                     } onCompletion: { result in
@@ -40,26 +41,22 @@ struct AuthView: View {
                         showSignUp = true
                     } label: {
                         Text("Sign up with email")
-                            .font(.body.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 50)
-                            .background(Color.accentColor)
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .shelfPrimaryButton()
                     }
 
                     NavigationLink {
                         LoginView()
                     } label: {
                         Text("Already have an account? **Sign in**")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.subheadlineSans)
+                            .foregroundStyle(ShelfColors.textSecondary)
                     }
-                    .padding(.top, 4)
+                    .padding(.top, ShelfSpacing.xxs)
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, ShelfSpacing.xxl)
                 .padding(.bottom, 40)
             }
+            .background(ShelfColors.background)
             .navigationDestination(isPresented: $showSignUp) {
                 SignUpView()
             }

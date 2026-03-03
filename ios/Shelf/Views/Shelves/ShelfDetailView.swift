@@ -30,6 +30,7 @@ struct ShelfDetailView: View {
         }
         .navigationTitle(shelf.name)
         .task { await load() }
+        .shelfPageBackground()
     }
 
     private var booksList: some View {
@@ -41,6 +42,8 @@ struct ShelfDetailView: View {
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(ShelfColors.background)
         .navigationDestination(for: Book.self) { book in
             BookDetailView(bookID: book.id)
         }

@@ -4,23 +4,24 @@ struct FeedItemView: View {
     let item: FeedItem
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: ShelfSpacing.md) {
             // User header
             HStack(spacing: 10) {
                 UserAvatarView(url: item.user.avatarURL, size: 36)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.user.username)
-                        .font(.subheadline.weight(.semibold))
+                        .font(ShelfFonts.subheadlineBold)
+                        .foregroundStyle(ShelfColors.textPrimary)
 
-                    HStack(spacing: 4) {
+                    HStack(spacing: ShelfSpacing.xxs) {
                         Text(item.activityType.displayText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textSecondary)
 
                         Text(item.createdAt.feedTimestamp)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textTertiary)
                     }
                 }
 
@@ -28,18 +29,19 @@ struct FeedItemView: View {
             }
 
             // Book info
-            HStack(spacing: 12) {
+            HStack(spacing: ShelfSpacing.md) {
                 BookCoverImage(url: item.book.coverImageURL, size: CGSize(width: 50, height: 75))
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: ShelfSpacing.xxs) {
                     Text(item.book.title)
-                        .font(.subheadline.weight(.semibold))
+                        .font(ShelfFonts.subheadlineBold)
+                        .foregroundStyle(ShelfColors.textPrimary)
                         .lineLimit(2)
 
                     if let author = item.book.authors.first?.name {
                         Text(author)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.captionSerif)
+                            .foregroundStyle(ShelfColors.textSecondary)
                     }
 
                     if let rating = item.rating {
@@ -55,7 +57,7 @@ struct FeedItemView: View {
             }
         }
         .padding(.horizontal)
-        .padding(.vertical, 12)
+        .padding(.vertical, ShelfSpacing.md)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)
     }

@@ -23,6 +23,7 @@ struct BookDetailView: View {
                 bookContent(book)
             }
         }
+        .shelfPageBackground()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -70,35 +71,36 @@ struct BookDetailView: View {
     @ViewBuilder
     private func bookContent(_ book: Book) -> some View {
         ScrollView {
-            VStack(spacing: 24) {
+            VStack(spacing: ShelfSpacing.xxl) {
                 // Hero cover
                 HeroBookCover(url: book.coverImageURL)
-                    .padding(.top, 8)
+                    .padding(.top, ShelfSpacing.sm)
 
                 // Title & Authors
-                VStack(spacing: 6) {
+                VStack(spacing: ShelfSpacing.xs) {
                     Text(book.title)
-                        .font(.title2.bold())
+                        .font(ShelfFonts.displaySmall)
+                        .foregroundStyle(ShelfColors.textPrimary)
                         .multilineTextAlignment(.center)
                         .accessibilityAddTraits(.isHeader)
 
                     if !book.authors.isEmpty {
                         Text(book.authors.map(\.name).joined(separator: ", "))
-                            .font(.body)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.captionSerif)
+                            .foregroundStyle(ShelfColors.textSecondary)
                     }
 
                     if let year = book.firstPublishedYear {
                         Text(String(year))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textTertiary)
                     }
                 }
                 .padding(.horizontal)
 
                 // Series badge
                 if !viewModel.seriesList.isEmpty {
-                    VStack(spacing: 4) {
+                    VStack(spacing: ShelfSpacing.xxs) {
                         ForEach(viewModel.seriesList) { series in
                             if let work = series.works.first {
                                 SeriesBadge(series: series, position: work.position)
@@ -109,13 +111,14 @@ struct BookDetailView: View {
 
                 // Rating summary
                 if let rating = book.averageRating {
-                    HStack(spacing: 8) {
+                    HStack(spacing: ShelfSpacing.sm) {
                         StarRatingDisplay(rating: rating, size: 16)
                         Text(String(format: "%.1f", rating))
-                            .font(.headline)
+                            .font(ShelfFonts.headlineSans)
+                            .foregroundStyle(ShelfColors.textPrimary)
                         Text("(\((book.ratingsCount ?? 0).formatted()) ratings)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.caption)
+                            .foregroundStyle(ShelfColors.textSecondary)
                     }
                 }
 
@@ -127,25 +130,21 @@ struct BookDetailView: View {
                         viewModel.userBook != nil ? "Edit Log" : "Log This Book",
                         systemImage: viewModel.userBook != nil ? "pencil" : "plus"
                     )
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 48)
-                    .background(Color.accentColor)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shelfPrimaryButton()
                 }
                 .padding(.horizontal)
                 .accessibilityLabel(viewModel.userBook != nil ? "Edit your log for \(book.title)" : "Log \(book.title)")
 
                 // Description
                 if let description = book.description, !description.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
                         Text("About")
-                            .font(.headline)
+                            .font(ShelfFonts.headlineSans)
+                            .foregroundStyle(ShelfColors.textPrimary)
                             .accessibilityAddTraits(.isHeader)
                         Text(description)
-                            .font(.body)
-                            .foregroundStyle(.secondary)
+                            .font(ShelfFonts.bodySerif)
+                            .foregroundStyle(ShelfColors.textSecondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal)
@@ -156,17 +155,19 @@ struct BookDetailView: View {
 
                 // Subjects
                 if let subjects = book.subjects, !subjects.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.sm) {
                         Text("Genres")
-                            .font(.headline)
+                            .font(ShelfFonts.headlineSans)
+                            .foregroundStyle(ShelfColors.textPrimary)
                             .accessibilityAddTraits(.isHeader)
-                        FlowLayout(spacing: 6) {
+                        FlowLayout(spacing: ShelfSpacing.xs) {
                             ForEach(subjects.prefix(8), id: \.self) { subject in
                                 Text(subject)
-                                    .font(.caption)
+                                    .font(ShelfFonts.caption)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 5)
-                                    .background(Color(.systemGray5))
+                                    .background(ShelfColors.backgroundTertiary)
+                                    .foregroundStyle(ShelfColors.textSecondary)
                                     .clipShape(Capsule())
                             }
                         }
@@ -179,20 +180,22 @@ struct BookDetailView: View {
                 if let url = book.bookshopURL, let bookshopURL = URL(string: url) {
                     Link(destination: bookshopURL) {
                         Label("Buy on Bookshop.org", systemImage: "cart")
-                            .font(.subheadline.weight(.medium))
+                            .font(ShelfFonts.subheadlineBold)
                             .frame(maxWidth: .infinity)
                             .frame(height: 44)
-                            .background(Color(.systemGray5))
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .background(ShelfColors.backgroundSecondary)
+                            .foregroundStyle(ShelfColors.textPrimary)
+                            .clipShape(RoundedRectangle(cornerRadius: ShelfRadius.medium))
                     }
                     .padding(.horizontal)
                 }
 
                 // Reviews section
                 if !viewModel.reviews.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.md) {
                         Text("Reviews")
-                            .font(.headline)
+                            .font(ShelfFonts.headlineSans)
+                            .foregroundStyle(ShelfColors.textPrimary)
                             .accessibilityAddTraits(.isHeader)
                             .padding(.horizontal)
 
@@ -204,23 +207,25 @@ struct BookDetailView: View {
 
                 // Similar books
                 if !viewModel.similarBooks.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: ShelfSpacing.md) {
                         Text("Readers also enjoyed")
-                            .font(.headline)
+                            .font(ShelfFonts.headlineSerif)
+                            .foregroundStyle(ShelfColors.textPrimary)
                             .accessibilityAddTraits(.isHeader)
                             .padding(.horizontal)
 
                         ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 12) {
+                            HStack(spacing: ShelfSpacing.md) {
                                 ForEach(viewModel.similarBooks) { similar in
                                     NavigationLink(value: similar) {
-                                        VStack(spacing: 6) {
+                                        VStack(spacing: ShelfSpacing.xs) {
                                             BookCoverImage(
                                                 url: similar.coverImageURL,
                                                 size: CGSize(width: 80, height: 120)
                                             )
                                             Text(similar.title)
-                                                .font(.caption)
+                                                .font(ShelfFonts.caption)
+                                                .foregroundStyle(ShelfColors.textSecondary)
                                                 .lineLimit(2)
                                                 .multilineTextAlignment(.center)
                                                 .frame(width: 80)
@@ -234,7 +239,7 @@ struct BookDetailView: View {
                     }
                 }
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, ShelfSpacing.xxl)
         }
         .navigationDestination(for: Book.self) { book in
             BookDetailView(bookID: book.id)

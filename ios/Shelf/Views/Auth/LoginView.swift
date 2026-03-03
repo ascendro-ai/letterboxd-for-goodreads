@@ -10,28 +10,24 @@ struct LoginView: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 16) {
+        VStack(spacing: ShelfSpacing.xxl) {
+            VStack(spacing: ShelfSpacing.lg) {
                 TextField("Email", text: $email)
                     .textContentType(.emailAddress)
                     .keyboardType(.emailAddress)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .shelfTextField()
 
                 SecureField("Password", text: $password)
                     .textContentType(.password)
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .shelfTextField()
             }
 
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                    .font(ShelfFonts.caption)
+                    .foregroundStyle(ShelfColors.error)
             }
 
             Button {
@@ -43,20 +39,16 @@ struct LoginView: View {
                             .tint(.white)
                     } else {
                         Text("Sign In")
-                            .fontWeight(.semibold)
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 50)
-                .background(Color.accentColor)
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .shelfPrimaryButton()
             }
             .disabled(isLoading || email.isEmpty || password.isEmpty)
 
             Spacer()
         }
-        .padding(24)
+        .padding(ShelfSpacing.xxl)
+        .background(ShelfColors.background)
         .navigationTitle("Sign In")
         .navigationBarTitleDisplayMode(.large)
     }

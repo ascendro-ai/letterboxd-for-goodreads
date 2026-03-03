@@ -23,6 +23,7 @@ struct OnboardingView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .animation(.easeInOut, value: currentStep)
+            .background(ShelfColors.background)
         }
     }
 }
@@ -33,19 +34,20 @@ private struct WelcomeStep: View {
     let onNext: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: ShelfSpacing.xxl) {
             Spacer()
 
             Image(systemName: "books.vertical.fill")
                 .font(.system(size: 72))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
 
             Text("Welcome to Shelf")
-                .font(.largeTitle.bold())
+                .font(ShelfFonts.displayLarge)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text("Track what you read. Discover what your friends are reading. Share your reviews.")
-                .font(.body)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.bodySerif)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
@@ -55,14 +57,9 @@ private struct WelcomeStep: View {
                 onNext()
             } label: {
                 Text("Get Started")
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 50)
-                    .background(Color.accentColor)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shelfPrimaryButton()
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, ShelfSpacing.xxl)
             .padding(.bottom, 40)
         }
     }
@@ -76,42 +73,38 @@ private struct ImportStep: View {
     @State private var showImport = false
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: ShelfSpacing.xxl) {
             Spacer()
 
             Image(systemName: "square.and.arrow.down")
                 .font(.system(size: 56))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
 
             Text("Bring Your Books")
-                .font(.title2.bold())
+                .font(ShelfFonts.displayMedium)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text("Import your library from Goodreads or StoryGraph. Your ratings, reviews, and shelves come with you.")
-                .font(.body)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.bodySerif)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
             Spacer()
 
-            VStack(spacing: 12) {
+            VStack(spacing: ShelfSpacing.md) {
                 Button {
                     showImport = true
                 } label: {
                     Text("Import Library")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
-                        .background(Color.accentColor)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shelfPrimaryButton()
                 }
 
                 Button("Skip for now", action: onSkip)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.subheadlineSans)
+                    .foregroundStyle(ShelfColors.textSecondary)
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, ShelfSpacing.xxl)
             .padding(.bottom, 40)
         }
         .sheet(isPresented: $showImport) {
@@ -136,18 +129,19 @@ private struct FollowStep: View {
     @State private var isLoading = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 12) {
+        VStack(spacing: ShelfSpacing.xxl) {
+            VStack(spacing: ShelfSpacing.md) {
                 Image(systemName: "person.2.fill")
                     .font(.system(size: 48))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(ShelfColors.accent)
 
                 Text("Find Readers")
-                    .font(.title2.bold())
+                    .font(ShelfFonts.displayMedium)
+                    .foregroundStyle(ShelfColors.textPrimary)
 
                 Text("Follow people to build your feed. We'll suggest readers with similar taste.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+                    .font(ShelfFonts.bodySerif)
+                    .foregroundStyle(ShelfColors.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
             }
@@ -156,12 +150,13 @@ private struct FollowStep: View {
             if isLoading {
                 Spacer()
                 ProgressView()
+                    .tint(ShelfColors.accent)
                 Spacer()
             } else if suggestedUsers.isEmpty {
                 Spacer()
                 Text("Suggestions will appear after you import or rate some books.")
-                    .font(.subheadline)
-                    .foregroundStyle(.tertiary)
+                    .font(ShelfFonts.subheadlineSans)
+                    .foregroundStyle(ShelfColors.textTertiary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
                 Spacer()
@@ -175,32 +170,27 @@ private struct FollowStep: View {
                             ) {
                                 toggleFollow(user)
                             }
-                            Divider().padding(.horizontal)
+                            ShelfDivider().padding(.horizontal)
                         }
                     }
                 }
             }
 
-            VStack(spacing: 12) {
+            VStack(spacing: ShelfSpacing.md) {
                 Button {
                     onNext()
                 } label: {
                     Text(followedIDs.isEmpty ? "Continue" : "Continue (\(followedIDs.count) following)")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
-                        .background(Color.accentColor)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shelfPrimaryButton()
                 }
 
                 if !suggestedUsers.isEmpty {
                     Button("Skip", action: onSkip)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(ShelfFonts.subheadlineSans)
+                        .foregroundStyle(ShelfColors.textSecondary)
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, ShelfSpacing.xxl)
             .padding(.bottom, 40)
         }
         .task {
@@ -238,16 +228,17 @@ struct SuggestedUserRow: View {
     let onToggle: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: ShelfSpacing.md) {
             UserAvatarView(url: user.avatarURL, size: 44)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(user.username)
-                    .font(.subheadline.weight(.semibold))
+                    .font(ShelfFonts.subheadlineBold)
+                    .foregroundStyle(ShelfColors.textPrimary)
                 if let displayName = user.displayName {
                     Text(displayName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(ShelfFonts.caption)
+                        .foregroundStyle(ShelfColors.textSecondary)
                 }
             }
 
@@ -255,16 +246,16 @@ struct SuggestedUserRow: View {
 
             Button(action: onToggle) {
                 Text(isFollowed ? "Following" : "Follow")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(isFollowed ? Color(.systemGray5) : Color.accentColor)
-                    .foregroundStyle(isFollowed ? Color.primary : Color.white)
+                    .font(ShelfFonts.captionBold)
+                    .padding(.horizontal, ShelfSpacing.md)
+                    .padding(.vertical, ShelfSpacing.xs)
+                    .background(isFollowed ? ShelfColors.backgroundTertiary : ShelfColors.accent)
+                    .foregroundStyle(isFollowed ? ShelfColors.textPrimary : Color.white)
                     .clipShape(Capsule())
             }
         }
         .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.vertical, ShelfSpacing.sm)
     }
 }
 
@@ -274,44 +265,40 @@ private struct NotificationStep: View {
     let onComplete: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: ShelfSpacing.xxl) {
             Spacer()
 
             Image(systemName: "bell.badge.fill")
                 .font(.system(size: 56))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(ShelfColors.accent)
 
             Text("Stay in the Loop")
-                .font(.title2.bold())
+                .font(ShelfFonts.displayMedium)
+                .foregroundStyle(ShelfColors.textPrimary)
 
             Text("Get notified when friends finish books or when your import is complete. We keep it minimal — no spam.")
-                .font(.body)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.bodySerif)
+                .foregroundStyle(ShelfColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
             Spacer()
 
-            VStack(spacing: 12) {
+            VStack(spacing: ShelfSpacing.md) {
                 Button {
                     enableNotifications()
                 } label: {
                     Text("Enable Notifications")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
-                        .background(Color.accentColor)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shelfPrimaryButton()
                 }
 
                 Button("Maybe Later") {
                     onComplete()
                 }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(ShelfFonts.subheadlineSans)
+                .foregroundStyle(ShelfColors.textSecondary)
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, ShelfSpacing.xxl)
             .padding(.bottom, 40)
         }
     }

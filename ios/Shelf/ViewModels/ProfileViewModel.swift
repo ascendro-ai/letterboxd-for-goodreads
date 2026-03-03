@@ -26,7 +26,11 @@ final class ProfileViewModel {
 
     @MainActor
     func load() async {
-        guard !isLoading else { return }
+        logger.info("ProfileViewModel.load() called, isLoading=\(self.isLoading), userID=\(self.userID?.uuidString ?? "nil (own)")")
+        guard !isLoading else {
+            logger.warning("ProfileViewModel.load() skipped — already loading")
+            return
+        }
         isLoading = true
         error = nil
 
@@ -41,26 +45,31 @@ final class ProfileViewModel {
             do { shelves = try await shelfService.getUserShelves(userID: userID) } catch {}
         } else {
             do {
+                logger.info("Calling getMyProfile()...")
                 profile = try await socialService.getMyProfile()
+                logger.info("getMyProfile() succeeded: \(self.profile?.user.username ?? "nil")")
             } catch {
-                logger.error("Failed to load own profile: \(error.localizedDescription)")
+                logger.error("Failed to load own profile: \(error)")
                 self.error = error
             }
 
             do {
                 books = try await userBookService.getMyBooks().items
+                logger.info("getMyBooks() returned \(self.books.count) books")
             } catch {
-                logger.error("Failed to load books: \(error.localizedDescription)")
+                logger.error("Failed to load books: \(error)")
             }
 
             do {
                 shelves = try await shelfService.getMyShelves()
+                logger.info("getMyShelves() returned \(self.shelves.count) shelves")
             } catch {
-                logger.error("Failed to load shelves: \(error.localizedDescription)")
+                logger.error("Failed to load shelves: \(error)")
             }
         }
 
         isLoading = false
+        logger.info("ProfileViewModel.load() done — profile=\(self.profile != nil), error=\(self.error != nil)")
     }
 
     @MainActor

@@ -28,50 +28,51 @@ struct SeriesDetailView: View {
         .task {
             if series == nil { await load() }
         }
+        .shelfPageBackground()
     }
 
     @ViewBuilder
     private func seriesContent(_ series: Series) -> some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: ShelfSpacing.lg) {
                 // Progress header
                 if let progress {
-                    VStack(spacing: 8) {
+                    VStack(spacing: ShelfSpacing.sm) {
                         ProgressView(value: progress.progressPercent, total: 100)
-                            .tint(.accentColor)
+                            .tint(ShelfColors.accent)
 
                         HStack {
                             Text("\(progress.readCount) of \(progress.totalMainEntries) read")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .font(ShelfFonts.subheadlineSans)
+                                .foregroundStyle(ShelfColors.textSecondary)
                             if progress.readingCount > 0 {
                                 Text("(\(progress.readingCount) reading)")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
+                                    .font(ShelfFonts.caption)
+                                    .foregroundStyle(ShelfColors.textTertiary)
                             }
                             Spacer()
                             Text("\(Int(progress.progressPercent))%")
-                                .font(.subheadline.weight(.semibold))
+                                .font(ShelfFonts.subheadlineBold)
                         }
                     }
-                    .padding(.horizontal)
+                    .padding(.horizontal, ShelfSpacing.lg)
                 }
 
                 if let description = series.description, !description.isEmpty {
                     Text(description)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal)
+                        .font(ShelfFonts.subheadlineSans)
+                        .foregroundStyle(ShelfColors.textSecondary)
+                        .padding(.horizontal, ShelfSpacing.lg)
                 }
 
                 // Book list
                 LazyVStack(spacing: 0) {
                     ForEach(series.works) { work in
-                        HStack(spacing: 12) {
+                        HStack(spacing: ShelfSpacing.md) {
                             // Position number
                             Text(positionText(work.position))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                                .font(ShelfFonts.caption.monospacedDigit())
+                                .foregroundStyle(ShelfColors.textSecondary)
                                 .frame(width: 28, alignment: .trailing)
 
                             // Cover
@@ -82,15 +83,16 @@ struct SeriesDetailView: View {
                             )
 
                             // Title + author + status
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: ShelfSpacing.xxs) {
                                 Text(work.title)
-                                    .font(.subheadline.weight(.medium))
+                                    .font(ShelfFonts.bodySerifBold)
                                     .lineLimit(2)
+                                    .foregroundStyle(ShelfColors.textPrimary)
 
                                 if let author = work.authors.first {
                                     Text(author)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .font(ShelfFonts.captionSerif)
+                                        .foregroundStyle(ShelfColors.textSecondary)
                                 }
                             }
 
@@ -99,15 +101,15 @@ struct SeriesDetailView: View {
                             // Reading status indicator
                             statusIcon(work.userStatus)
                         }
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, ShelfSpacing.lg)
+                        .padding(.vertical, ShelfSpacing.sm)
 
-                        Divider()
-                            .padding(.horizontal)
+                        ShelfDivider()
+                            .padding(.horizontal, ShelfSpacing.lg)
                     }
                 }
             }
-            .padding(.top, 8)
+            .padding(.top, ShelfSpacing.sm)
         }
     }
 
@@ -116,19 +118,19 @@ struct SeriesDetailView: View {
         switch status {
         case "read":
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(ShelfColors.forest)
                 .accessibilityLabel("Read")
         case "reading":
             Image(systemName: "book.fill")
-                .foregroundStyle(.blue)
+                .foregroundStyle(ShelfColors.ocean)
                 .accessibilityLabel("Currently reading")
         case "want_to_read":
             Image(systemName: "bookmark.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(ShelfColors.amber)
                 .accessibilityLabel("Want to read")
         default:
             Image(systemName: "circle")
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(ShelfColors.textTertiary)
                 .accessibilityLabel("Not started")
         }
     }
