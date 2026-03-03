@@ -5,7 +5,7 @@ final class BookDetailViewModel {
     let bookID: UUID
 
     private(set) var book: Book?
-    private(set) var reviews: [Review] = []
+    private(set) var reviews: [UserBook] = []
     private(set) var similarBooks: [Book] = []
     private(set) var userBook: UserBook?
     private(set) var seriesList: [Series] = []
@@ -28,20 +28,10 @@ final class BookDetailViewModel {
         isLoading = true
         error = nil
 
+        // Load book first (required), then load supplementary data independently
         do {
-            async let bookResult = bookService.getBook(id: bookID)
-            async let reviewsResult = bookService.getReviews(bookID: bookID)
-            async let similarResult = bookService.getSimilarBooks(bookID: bookID)
-            async let seriesResult = seriesService.getBookSeries(workID: bookID)
-
-            let (b, r, s, series) = try await (bookResult, reviewsResult, similarResult, seriesResult)
-            book = b
-            reviews = r.items
-            similarBooks = s
-            seriesList = series
-
-            // Cache the book for offline use
-            offlineStore.cacheBook(b)
+            book = try await bookService.getBook(id: bookID)
+            offlineStore.cacheBook(book!)
         } catch {
             // Try offline cache fallback
             if let cached = offlineStore.getCachedBook(id: bookID) {
@@ -52,7 +42,7 @@ final class BookDetailViewModel {
                     description: nil,
                     firstPublishedYear: nil,
                     authors: cached.authorName.map { [Author(id: UUID(), name: $0, bio: nil, photoURL: nil)] } ?? [],
-                    subjects: [],
+                    subjects: nil,
                     coverImageURL: cached.coverImageURL,
                     averageRating: cached.averageRating,
                     ratingsCount: 0,
@@ -63,7 +53,41 @@ final class BookDetailViewModel {
             self.error = error
         }
 
+        // Load supplementary data — failures are non-fatal
+        async let reviewsResult: () = loadReviews()
+        async let similarResult: () = loadSimilarBooks()
+        async let seriesResult: () = loadSeries()
+        _ = await (reviewsResult, similarResult, seriesResult)
+
         isLoading = false
+    }
+
+    @MainActor
+    private func loadReviews() async {
+        do {
+            let response = try await bookService.getReviews(bookID: bookID)
+            reviews = response.items
+        } catch {
+            // Reviews are non-critical — silently fail
+        }
+    }
+
+    @MainActor
+    private func loadSimilarBooks() async {
+        do {
+            similarBooks = try await bookService.getSimilarBooks(bookID: bookID)
+        } catch {
+            // Similar books are non-critical — silently fail
+        }
+    }
+
+    @MainActor
+    private func loadSeries() async {
+        do {
+            seriesList = try await seriesService.getBookSeries(workID: bookID)
+        } catch {
+            // Series is non-critical — silently fail
+        }
     }
 
     @MainActor

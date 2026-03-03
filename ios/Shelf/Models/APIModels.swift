@@ -107,7 +107,7 @@ enum ImportState: String, Codable {
 struct Review: Codable, Identifiable, Hashable {
     let id: UUID
     let user: User
-    let rating: Double
+    let rating: Double?
     let reviewText: String?
     let hasSpoilers: Bool
     let createdAt: Date
@@ -117,5 +117,21 @@ struct Review: Codable, Identifiable, Hashable {
         case reviewText = "review_text"
         case hasSpoilers = "has_spoilers"
         case createdAt = "created_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        user = try container.decode(User.self, forKey: .user)
+        reviewText = try container.decodeIfPresent(String.self, forKey: .reviewText)
+        hasSpoilers = try container.decodeIfPresent(Bool.self, forKey: .hasSpoilers) ?? false
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        if let doubleVal = try? container.decodeIfPresent(Double.self, forKey: .rating) {
+            rating = doubleVal
+        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .rating) {
+            rating = Double(strVal)
+        } else {
+            rating = nil
+        }
     }
 }

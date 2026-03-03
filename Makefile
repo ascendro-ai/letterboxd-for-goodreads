@@ -48,5 +48,11 @@ test-backend: ## Run backend tests
 test-pipeline: ## Run pipeline tests
 	cd pipeline && .venv/bin/pytest tests/ -v
 
+xcode: ## Regenerate Xcode project from project.yml
+	cd ios/Shelf && xcodegen generate
+
+build-ios: xcode ## Build iOS app (simulator)
+	xcodebuild -project ios/Shelf/Shelf.xcodeproj -scheme Shelf -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' build
+
 clean: ## Remove venvs (preserves .env and Docker volumes)
 	rm -rf backend/.venv pipeline/.venv

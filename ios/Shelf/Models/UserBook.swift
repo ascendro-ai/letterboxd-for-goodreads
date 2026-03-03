@@ -34,7 +34,7 @@ enum ReadingStatus: String, Codable, CaseIterable {
 
 struct UserBook: Codable, Identifiable, Hashable {
     let id: UUID
-    let userID: UUID
+    let userID: UUID?
     let workID: UUID
     let status: ReadingStatus
     let rating: Double?
@@ -62,6 +62,31 @@ struct UserBook: Codable, Identifiable, Hashable {
         case isPrivate = "is_private"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        userID = try container.decodeIfPresent(UUID.self, forKey: .userID)
+        workID = try container.decode(UUID.self, forKey: .workID)
+        status = try container.decode(ReadingStatus.self, forKey: .status)
+        reviewText = try container.decodeIfPresent(String.self, forKey: .reviewText)
+        hasSpoilers = try container.decodeIfPresent(Bool.self, forKey: .hasSpoilers) ?? false
+        startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        isImported = try container.decodeIfPresent(Bool.self, forKey: .isImported) ?? false
+        isPrivate = try container.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        book = try container.decodeIfPresent(Book.self, forKey: .book)
+        // Backend returns rating as string "4.5" — parse flexibly
+        if let doubleVal = try? container.decodeIfPresent(Double.self, forKey: .rating) {
+            rating = doubleVal
+        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .rating) {
+            rating = Double(strVal)
+        } else {
+            rating = nil
+        }
     }
 }
 

@@ -12,22 +12,25 @@ struct ReadingStatsView: View {
     }
 
     var body: some View {
-        Group {
-            if viewModel.isLoading && viewModel.stats == nil {
-                LoadingStateView()
-            } else if let error = viewModel.error, viewModel.stats == nil {
-                ErrorStateView(error: error) {
-                    Task { await viewModel.load() }
+        content
+            .navigationTitle("Reading Stats")
+            .task {
+                if viewModel.stats == nil {
+                    await viewModel.load()
                 }
-            } else if let stats = viewModel.stats {
-                statsContent(stats)
             }
-        }
-        .navigationTitle("Reading Stats")
-        .task {
-            if viewModel.stats == nil {
-                await viewModel.load()
-            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let stats = viewModel.stats {
+            statsContent(stats)
+        } else if let errorMessage = viewModel.error {
+            ErrorStateView(error: NSError(domain: "", code: 0, userInfo: [NSLocalizedDescriptionKey: errorMessage]), retry: {
+                Task { await viewModel.load() }
+            })
+        } else {
+            LoadingStateView()
         }
     }
 
@@ -102,9 +105,8 @@ struct ReadingStatsView: View {
                     x: .value("Month", monthName(item.month)),
                     y: .value("Books", item.count)
                 )
-                .foregroundStyle(Color.accentColor.gradient)
-                .cornerRadius(4)
-            }
+                .foregroundStyle(Color.accentColor)
+                            }
             .frame(height: 200)
             .chartXAxis {
                 AxisMarks(values: .automatic) { _ in
@@ -129,9 +131,8 @@ struct ReadingStatsView: View {
                     x: .value("Rating", String(format: "%.1f", item.rating)),
                     y: .value("Count", item.count)
                 )
-                .foregroundStyle(Color.yellow.gradient)
-                .cornerRadius(4)
-            }
+                .foregroundStyle(Color.yellow)
+                            }
             .frame(height: 160)
         }
         .padding()
@@ -173,9 +174,8 @@ struct ReadingStatsView: View {
                     x: .value("Year", String(item.year)),
                     y: .value("Books", item.booksRead)
                 )
-                .foregroundStyle(Color.accentColor.gradient)
-                .cornerRadius(4)
-            }
+                .foregroundStyle(Color.accentColor)
+                            }
             .frame(height: 160)
         }
         .padding()

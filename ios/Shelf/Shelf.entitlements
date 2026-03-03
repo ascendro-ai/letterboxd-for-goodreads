@@ -8,9 +8,5 @@
 	<array>
 		<string>default</string>
 	</array>
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.com.shelf.app</string>
-	</array>
 </dict>
 </plist>

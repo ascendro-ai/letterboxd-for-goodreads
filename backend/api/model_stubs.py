@@ -285,7 +285,7 @@ class Activity(Base):
     user_id: Mapped[uuid.UUID] = _fk_uuid_col("users.id", index=True)
     activity_type: Mapped[str] = mapped_column(String(30))
     target_id: Mapped[uuid.UUID] = _uuid_col(default=False)
-    metadata_: Mapped[Optional[dict]] = _jsonb_col(nullable=True, key="metadata")
+    metadata_: Mapped[Optional[dict]] = _jsonb_col(nullable=True, name="metadata")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

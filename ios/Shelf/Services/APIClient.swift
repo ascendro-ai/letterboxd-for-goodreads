@@ -5,6 +5,9 @@
 /// throw ``APIError`` on failure. Supports opportunistic caching for offline use.
 
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "com.shelf.app", category: "API")
 
 // MARK: - API Configuration
 
@@ -14,7 +17,7 @@ enum APIEnvironment {
 
     var baseURL: String {
         switch self {
-        case .development: "http://localhost:8000/api/v1"
+        case .development: "http://127.0.0.1:8000/api/v1"
         case .production: "https://shelf-api.up.railway.app/api/v1"
         }
     }
@@ -86,7 +89,25 @@ final class APIClient {
         self.session = URLSession(configuration: config)
 
         self.decoder = JSONDecoder()
-        self.decoder.dateDecodingStrategy = .iso8601
+        self.decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let string = try container.decode(String.self)
+            // Try ISO8601 with fractional seconds and timezone
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = iso.date(from: string) { return date }
+            // Try without fractional seconds
+            iso.formatOptions = [.withInternetDateTime]
+            if let date = iso.date(from: string) { return date }
+            // Backend returns naive datetimes (no timezone) — assume UTC
+            let naive = DateFormatter()
+            naive.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
+            naive.timeZone = TimeZone(identifier: "UTC")
+            if let date = naive.date(from: string) { return date }
+            naive.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+            if let date = naive.date(from: string) { return date }
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Cannot parse date: \(string)")
+        }
 
         self.encoder = JSONEncoder()
         self.encoder.dateEncodingStrategy = .iso8601
@@ -125,6 +146,7 @@ final class APIClient {
         }
 
         let cacheKey = "\(method.rawValue):\(url.absoluteString)"
+        logger.debug("\(method.rawValue) \(path)")
 
         do {
             let (data, response) = try await perform(request)
@@ -136,7 +158,11 @@ final class APIClient {
             }
 
             return try decoder.decode(T.self, from: data)
+        } catch let error as DecodingError {
+            logger.error("Decode error on \(method.rawValue) \(path): \(String(describing: error))")
+            throw error
         } catch let error as APIError {
+            logger.error("API error on \(method.rawValue) \(path): \(error.localizedDescription)")
             // On network error for GET requests, try cache fallback
             if case .networkError = error, method == .get,
                let cachedData = responseCache[cacheKey] {

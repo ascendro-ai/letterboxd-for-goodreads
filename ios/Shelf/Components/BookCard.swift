@@ -28,8 +28,8 @@ struct BookCard: View {
                         Text(String(format: "%.1f", rating))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if book.ratingsCount > 0 {
-                            Text("(\(book.ratingsCount.formatted()))")
+                        if let count = book.ratingsCount, count > 0 {
+                            Text("(\(count.formatted()))")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }

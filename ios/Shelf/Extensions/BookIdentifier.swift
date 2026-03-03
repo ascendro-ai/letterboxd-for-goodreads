@@ -62,7 +62,7 @@ enum BookIdentifier {
         // Google Books: /books?id=VOLUMEID
         if urlString.contains("books.google") {
             if let components = URLComponents(string: urlString),
-               let volumeID = components.queryItems?.first(where: { $0.name == "id" })?.value {
+               components.queryItems?.first(where: { $0.name == "id" })?.value != nil {
                 // Google Books volume IDs can be looked up via search
                 return .rawURL(url)
             }

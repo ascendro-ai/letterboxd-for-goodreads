@@ -7,6 +7,24 @@ options:
   generateEmptyDirectories: true
   groupSortPosition: top
 
+schemes:
+  Shelf:
+    build:
+      targets:
+        Shelf: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - ShelfTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -55,6 +73,7 @@ targets:
         NSCameraUsageDescription: "Shelf uses your camera to scan book barcodes."
         NSPhotoLibraryUsageDescription: "Shelf needs photo access to set your profile picture."
         NSContactsUsageDescription: "Find friends who are already on Shelf."
+        NSUserTrackingUsageDescription: "Shelf uses this to show you relevant book recommendations and ads."
         ITSAppUsesNonExemptEncryption: false
         UIBackgroundModes:
           - remote-notification

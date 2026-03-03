@@ -34,6 +34,12 @@ final class ImportViewModel {
                 status = try await importService.importGoodreads(csvData: data)
             case .storygraph:
                 status = try await importService.importStoryGraph(csvData: data)
+            case .kindle, .kobo:
+                self.error = NSError(domain: "Import", code: 0, userInfo: [
+                    NSLocalizedDescriptionKey: "\(selectedSource.rawValue.capitalized) import is not yet available."
+                ])
+                isUploading = false
+                return
             }
             importStatus = status
             startPolling()

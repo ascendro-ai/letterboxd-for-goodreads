@@ -30,7 +30,7 @@ final class BookService {
 
     // MARK: - Reviews
 
-    func getReviews(bookID: UUID, cursor: String? = nil) async throws -> PaginatedResponse<Review> {
+    func getReviews(bookID: UUID, cursor: String? = nil) async throws -> PaginatedResponse<UserBook> {
         var queryItems: [URLQueryItem] = []
         if let cursor { queryItems.append(URLQueryItem(name: "cursor", value: cursor)) }
         return try await api.request(.get, path: "/books/\(bookID.uuidString)/reviews", queryItems: queryItems)
@@ -44,7 +44,7 @@ final class BookService {
 
     // MARK: - Popular
 
-    func getPopular() async throws -> [Book] {
+    func getPopular() async throws -> PaginatedResponse<Book> {
         try await api.request(.get, path: "/books/popular")
     }
 }

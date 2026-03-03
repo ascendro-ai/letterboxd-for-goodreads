@@ -45,18 +45,24 @@ struct NotificationsView: View {
     private var notificationsList: some View {
         List(viewModel.notifications) { notification in
             HStack(spacing: 12) {
-                Image(systemName: "bell.fill")
-                    .font(.body)
-                    .foregroundStyle(notification.isRead ? Color.secondary : Color.accentColor)
+                if let actor = notification.actor {
+                    UserAvatarView(url: actor.avatarURL, size: 36)
+                } else {
+                    Image(systemName: "bell.fill")
+                        .font(.body)
+                        .foregroundStyle(notification.isRead ? Color.secondary : Color.accentColor)
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(notification.title)
                         .font(.subheadline.weight(notification.isRead ? .regular : .semibold))
 
-                    Text(notification.body)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                    if !notification.body.isEmpty {
+                        Text(notification.body)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
 
                     Text(notification.createdAt.feedTimestamp)
                         .font(.caption2)

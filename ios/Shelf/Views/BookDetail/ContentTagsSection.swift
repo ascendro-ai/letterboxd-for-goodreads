@@ -51,7 +51,7 @@ final class ContentTagsViewModel {
 
     func removeVote(tagName: String) async {
         do {
-            try await APIClient.shared.requestVoid(.delete, path: "/books/\(workID.uuidString)/tags/\(tagName)/vote")
+            try await APIClient.shared.request(.delete, path: "/books/\(workID.uuidString)/tags/\(tagName)/vote")
             tags.removeAll { $0.tagName == tagName }
         } catch {
             // Removal failed
@@ -230,7 +230,7 @@ struct TagPickerSheet: View {
                 Spacer()
                 if alreadyVoted {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.accentColor)
+                        .foregroundStyle(Color.accentColor)
                 }
             }
         }

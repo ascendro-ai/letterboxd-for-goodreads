@@ -2,7 +2,7 @@ import Foundation
 
 struct Shelf: Codable, Identifiable, Hashable {
     let id: UUID
-    let userID: UUID
+    let userID: UUID?
     let name: String
     let slug: String
     let description: String?
@@ -16,7 +16,7 @@ struct Shelf: Codable, Identifiable, Hashable {
         case userID = "user_id"
         case isPublic = "is_public"
         case displayOrder = "display_order"
-        case booksCount = "books_count"
+        case booksCount = "book_count"
         case createdAt = "created_at"
     }
 }

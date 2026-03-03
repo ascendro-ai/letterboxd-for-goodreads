@@ -57,37 +57,91 @@ struct FeedItem: Codable, Identifiable, Hashable {
         case hasSpoilers = "has_spoilers"
         case createdAt = "created_at"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        user = try container.decode(User.self, forKey: .user)
+        activityType = try container.decode(ActivityType.self, forKey: .activityType)
+        book = try container.decode(Book.self, forKey: .book)
+        reviewText = try container.decodeIfPresent(String.self, forKey: .reviewText)
+        hasSpoilers = try container.decodeIfPresent(Bool.self, forKey: .hasSpoilers) ?? false
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        // Backend returns rating as string "4.0" — parse flexibly
+        if let doubleVal = try? container.decodeIfPresent(Double.self, forKey: .rating) {
+            rating = doubleVal
+        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .rating) {
+            rating = Double(strVal)
+        } else {
+            rating = nil
+        }
+    }
 }
 
 // MARK: - Notification
 
-struct AppNotification: Codable, Identifiable, Hashable {
+struct NotificationActor: Codable, Hashable {
     let id: UUID
-    let type: String
-    let title: String
-    let body: String
-    let isRead: Bool
-    let metadata: NotificationMetadata?
-    let createdAt: Date
+    let username: String
+    let displayName: String?
+    let avatarURL: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, title, body, metadata
-        case isRead = "is_read"
-        case createdAt = "created_at"
+        case id, username
+        case displayName = "display_name"
+        case avatarURL = "avatar_url"
     }
 }
 
-struct NotificationMetadata: Codable, Hashable {
-    let userID: UUID?
-    let bookID: UUID?
-    let username: String?
-    let bookTitle: String?
+struct AppNotification: Codable, Identifiable, Hashable {
+    let id: UUID
+    let type: String
+    let actor: NotificationActor?
+    let data: NotificationData?
+    let isRead: Bool
+    let createdAt: Date
 
     enum CodingKeys: String, CodingKey {
-        case username
-        case userID = "user_id"
+        case id, type, actor, data
+        case isRead = "is_read"
+        case createdAt = "created_at"
+    }
+
+    var title: String {
+        let name = actor?.displayName ?? actor?.username ?? "Someone"
+        switch type {
+        case "new_follower": return "\(name) followed you"
+        case "new_review": return "\(name) reviewed a book"
+        case "book_recommendation": return "\(name) recommended a book"
+        default: return "New notification"
+        }
+    }
+
+    var body: String {
+        switch type {
+        case "new_follower":
+            return "@\(actor?.username ?? "unknown") started following you"
+        case "new_review":
+            let bookTitle = data?.bookTitle ?? "a book"
+            return "\(actor?.displayName ?? "Someone") reviewed \(bookTitle)"
+        case "book_recommendation":
+            let bookTitle = data?.bookTitle ?? "a book"
+            return "\(actor?.displayName ?? "Someone") thinks you'd like \(bookTitle)"
+        default:
+            return ""
+        }
+    }
+}
+
+struct NotificationData: Codable, Hashable {
+    let bookID: UUID?
+    let bookTitle: String?
+    let reviewID: UUID?
+
+    enum CodingKeys: String, CodingKey {
         case bookID = "book_id"
         case bookTitle = "book_title"
+        case reviewID = "review_id"
     }
 }
 
@@ -103,5 +157,20 @@ struct TasteMatch: Codable, Identifiable, Hashable {
         case user
         case matchScore = "match_score"
         case overlappingBooksCount = "overlapping_books_count"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        user = try container.decode(User.self, forKey: .user)
+        overlappingBooksCount = try container.decode(Int.self, forKey: .overlappingBooksCount)
+        // Backend returns Decimal as string "0.850" — parse flexibly
+        if let doubleVal = try? container.decode(Double.self, forKey: .matchScore) {
+            matchScore = doubleVal
+        } else if let strVal = try? container.decode(String.self, forKey: .matchScore),
+                  let parsed = Double(strVal) {
+            matchScore = parsed
+        } else {
+            matchScore = 0
+        }
     }
 }

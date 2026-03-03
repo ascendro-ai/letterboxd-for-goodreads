@@ -31,37 +31,16 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>GADApplicationIdentifier</key>
-	<string>ca-app-pub-9251412499428760~4178728473</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<key>NSUserTrackingUsageDescription</key>
-	<string>Shelf uses this to show you relevant book recommendations in ads.</string>
-	<key>SKAdNetworkItems</key>
-	<array>
-		<dict>
-			<key>SKAdNetworkIdentifier</key>
-			<string>cstr6suwn9.skadnetwork</string>
-		</dict>
-		<dict>
-			<key>SKAdNetworkIdentifier</key>
-			<string>4fzdc2evr5.skadnetwork</string>
-		</dict>
-		<dict>
-			<key>SKAdNetworkIdentifier</key>
-			<string>2fnua5tdw4.skadnetwork</string>
-		</dict>
-		<dict>
-			<key>SKAdNetworkIdentifier</key>
-			<string>ydx93a7ass.skadnetwork</string>
-		</dict>
-	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Shelf uses your camera to scan book barcodes.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>Find friends who are already on Shelf.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Shelf needs photo access to set your profile picture.</string>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>Shelf uses this to show you relevant book recommendations and ads.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

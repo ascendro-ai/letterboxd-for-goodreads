@@ -6,6 +6,9 @@
 
 import Foundation
 import AuthenticationServices
+import os.log
+
+private let logger = Logger(subsystem: "com.shelf.app", category: "Auth")
 
 // MARK: - Auth State
 
@@ -39,6 +42,23 @@ final class AuthService {
     // MARK: - Session Restore
 
     func restoreSession() async {
+        #if DEBUG
+        // Dev auth bypass: skip Supabase, use dev token against local backend
+        let devToken = "dev-user-00000000-0000-0000-0000-000000000001"
+        api.authToken = devToken
+        logger.info("Attempting dev auth bypass...")
+        do {
+            let user: User = try await api.request(.get, path: "/me")
+            logger.info("Dev auth success — signed in as \(user.username)")
+            currentUser = user
+            state = .signedIn(user)
+            return
+        } catch {
+            logger.error("Dev auth failed: \(error.localizedDescription)")
+            api.authToken = nil
+        }
+        #endif
+
         guard let token = KeychainHelper.read(key: tokenKey),
               let refreshToken = KeychainHelper.read(key: refreshTokenKey) else {
             state = .signedOut

@@ -40,9 +40,11 @@ struct ShelfApp: App {
                     }
 
                     // Request ATT for non-premium users (AdMob personalization)
+                    #if !DEBUG
                     if !SubscriptionService.shared.isPremium {
                         await AdService.shared.requestTrackingAuthorization()
                     }
+                    #endif
 
                     // Check for pending book from share extension
                     if let pendingURL = SharedStorage.pendingBookURL {

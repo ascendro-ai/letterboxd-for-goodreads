@@ -68,7 +68,7 @@ final class SocialService {
         try await api.request(.get, path: "/users/\(userID.uuidString)")
     }
 
-    func getMyProfile() async throws -> User {
+    func getMyProfile() async throws -> UserProfile {
         try await api.request(.get, path: "/me")
     }
 

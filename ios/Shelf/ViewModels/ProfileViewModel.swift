@@ -1,4 +1,7 @@
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "com.shelf.app", category: "Profile")
 
 @Observable
 final class ProfileViewModel {
@@ -27,36 +30,34 @@ final class ProfileViewModel {
         isLoading = true
         error = nil
 
-        do {
-            if let userID {
-                async let profileResult = socialService.getProfile(userID: userID)
-                async let booksResult = userBookService.getUserBooks(userID: userID)
-                async let shelvesResult = shelfService.getUserShelves(userID: userID)
-
-                let (p, b, s) = try await (profileResult, booksResult, shelvesResult)
-                profile = p
-                books = b.items
-                shelves = s
-            } else {
-                async let userResult = socialService.getMyProfile()
-                async let booksResult = userBookService.getMyBooks()
-                async let shelvesResult = shelfService.getMyShelves()
-
-                let (u, b, s) = try await (userResult, booksResult, shelvesResult)
-                profile = UserProfile(
-                    user: u,
-                    booksCount: b.items.count,
-                    followersCount: 0,
-                    followingCount: 0,
-                    isFollowing: nil,
-                    isBlocked: nil,
-                    isMuted: nil
-                )
-                books = b.items
-                shelves = s
+        if let userID {
+            do {
+                profile = try await socialService.getProfile(userID: userID)
+            } catch {
+                logger.error("Failed to load other user profile: \(error.localizedDescription)")
+                self.error = error
             }
-        } catch {
-            self.error = error
+            do { books = try await userBookService.getUserBooks(userID: userID).items } catch {}
+            do { shelves = try await shelfService.getUserShelves(userID: userID) } catch {}
+        } else {
+            do {
+                profile = try await socialService.getMyProfile()
+            } catch {
+                logger.error("Failed to load own profile: \(error.localizedDescription)")
+                self.error = error
+            }
+
+            do {
+                books = try await userBookService.getMyBooks().items
+            } catch {
+                logger.error("Failed to load books: \(error.localizedDescription)")
+            }
+
+            do {
+                shelves = try await shelfService.getMyShelves()
+            } catch {
+                logger.error("Failed to load shelves: \(error.localizedDescription)")
+            }
         }
 
         isLoading = false

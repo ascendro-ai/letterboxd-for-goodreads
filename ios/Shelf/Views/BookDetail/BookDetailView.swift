@@ -113,7 +113,7 @@ struct BookDetailView: View {
                         StarRatingDisplay(rating: rating, size: 16)
                         Text(String(format: "%.1f", rating))
                             .font(.headline)
-                        Text("(\(book.ratingsCount.formatted()) ratings)")
+                        Text("(\((book.ratingsCount ?? 0).formatted()) ratings)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -155,13 +155,13 @@ struct BookDetailView: View {
                 ContentTagsSection(workID: book.id)
 
                 // Subjects
-                if !book.subjects.isEmpty {
+                if let subjects = book.subjects, !subjects.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Genres")
                             .font(.headline)
                             .accessibilityAddTraits(.isHeader)
                         FlowLayout(spacing: 6) {
-                            ForEach(book.subjects.prefix(8), id: \.self) { subject in
+                            ForEach(subjects.prefix(8), id: \.self) { subject in
                                 Text(subject)
                                     .font(.caption)
                                     .padding(.horizontal, 10)
@@ -196,8 +196,8 @@ struct BookDetailView: View {
                             .accessibilityAddTraits(.isHeader)
                             .padding(.horizontal)
 
-                        ForEach(viewModel.reviews) { review in
-                            ReviewRow(review: review)
+                        ForEach(viewModel.reviews) { userBook in
+                            UserBookReviewRow(userBook: userBook)
                         }
                     }
                 }
