@@ -119,6 +119,10 @@
 		AA44BB55CC66DD77EE88FF99 /* SpineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB55CC66DD77EE88FF990044 /* SpineView.swift */; };
 		AA55BB66CC77DD88EE99FFAA /* ReadingProgressBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB66CC77DD88EE99FFAA0055 /* ReadingProgressBar.swift */; };
 		AA66BB77CC88DD99EEAAFFBB /* DogEarEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB77CC88DD99EEAAFFBB0066 /* DogEarEffect.swift */; };
+		CC11DD22EE33FF44AA55BB01 /* ShelfInteractions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD11EE22FF33AA44BB55CC01 /* ShelfInteractions.swift */; };
+		CC11DD22EE33FF44AA55BB02 /* CustomTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD11EE22FF33AA44BB55CC02 /* CustomTabBar.swift */; };
+		CC11DD22EE33FF44AA55BB03 /* ShelfRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD11EE22FF33AA44BB55CC03 /* ShelfRowView.swift */; };
+		CC11DD22EE33FF44AA55BB04 /* ShelvesHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD11EE22FF33AA44BB55CC04 /* ShelvesHomeView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -265,6 +269,10 @@
 		BB55CC66DD77EE88FF990044 /* SpineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpineView.swift; sourceTree = "<group>"; };
 		BB66CC77DD88EE99FFAA0055 /* ReadingProgressBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingProgressBar.swift; sourceTree = "<group>"; };
 		BB77CC88DD99EEAAFFBB0066 /* DogEarEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DogEarEffect.swift; sourceTree = "<group>"; };
+		DD11EE22FF33AA44BB55CC01 /* ShelfInteractions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShelfInteractions.swift; sourceTree = "<group>"; };
+		DD11EE22FF33AA44BB55CC02 /* CustomTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomTabBar.swift; sourceTree = "<group>"; };
+		DD11EE22FF33AA44BB55CC03 /* ShelfRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShelfRowView.swift; sourceTree = "<group>"; };
+		DD11EE22FF33AA44BB55CC04 /* ShelvesHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShelvesHomeView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -370,6 +378,9 @@
 				BB55CC66DD77EE88FF990044 /* SpineView.swift */,
 				BB66CC77DD88EE99FFAA0055 /* ReadingProgressBar.swift */,
 				BB77CC88DD99EEAAFFBB0066 /* DogEarEffect.swift */,
+				DD11EE22FF33AA44BB55CC02 /* CustomTabBar.swift */,
+				DD11EE22FF33AA44BB55CC01 /* ShelfInteractions.swift */,
+				DD11EE22FF33AA44BB55CC03 /* ShelfRowView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -508,6 +519,7 @@
 			children = (
 				572A529832EB2F7A29008BA8 /* CreateShelfView.swift */,
 				4FD778FC59F3D5E88084F6D5 /* ShelfDetailView.swift */,
+				DD11EE22FF33AA44BB55CC04 /* ShelvesHomeView.swift */,
 			);
 			path = Shelves;
 			sourceTree = "<group>";
@@ -856,6 +868,10 @@
 				E0C601FF8D2139C7C939AFD7 /* UserAvatarView.swift in Sources */,
 				7CC04181A0CB6639E8D2EF0C /* UserBook.swift in Sources */,
 				F90CFB5B879E53455AB3AE75 /* UserBookService.swift in Sources */,
+				CC11DD22EE33FF44AA55BB01 /* ShelfInteractions.swift in Sources */,
+				CC11DD22EE33FF44AA55BB02 /* CustomTabBar.swift in Sources */,
+				CC11DD22EE33FF44AA55BB03 /* ShelfRowView.swift in Sources */,
+				CC11DD22EE33FF44AA55BB04 /* ShelvesHomeView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

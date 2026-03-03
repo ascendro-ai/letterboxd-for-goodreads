@@ -3,7 +3,7 @@ import SwiftUI
 struct BookCoverImage: View {
     let url: String?
     var size: CGSize = CGSize(width: 60, height: 90)
-    var cornerRadius: CGFloat = 6
+    var cornerRadius: CGFloat = ShelfRadius.cover
     var bookTitle: String? = nil
 
     var body: some View {

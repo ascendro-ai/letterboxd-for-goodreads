@@ -2,6 +2,7 @@
 /// the backend's Numeric(2,1) rating storage.
 
 import SwiftUI
+import UIKit
 
 // MARK: - Interactive Star Rating Input
 
@@ -57,6 +58,7 @@ struct StarRatingView: View {
 
     private func handleTap(star: Int) {
         let value = Double(star)
+        let oldRating = rating
         // Tap same star toggles between full and half
         if rating == value {
             rating = value - 0.5
@@ -64,6 +66,9 @@ struct StarRatingView: View {
             rating = 0
         } else {
             rating = value
+        }
+        if rating != oldRating {
+            ShelfHaptics.shared.ratingChanged()
         }
     }
 
@@ -90,7 +95,7 @@ struct StarRatingView: View {
 struct StarRatingDisplay: View {
     let rating: Double
     var maxRating: Int = 5
-    var size: CGFloat = 14
+    var size: CGFloat = 12
     var spacing: CGFloat = 1
     var color: Color = ShelfColors.starFilled
 

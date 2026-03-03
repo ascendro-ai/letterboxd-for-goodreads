@@ -89,6 +89,7 @@ enum ShelfSpacing {
     static let xl: CGFloat = 20
     static let xxl: CGFloat = 24
     static let xxxl: CGFloat = 32
+    static let huge: CGFloat = 40
     static let page: CGFloat = 20
 }
 
@@ -97,7 +98,8 @@ enum ShelfSpacing {
 enum ShelfRadius {
     static let small: CGFloat = 4
     static let medium: CGFloat = 8
-    static let large: CGFloat = 12
+    static let cover: CGFloat = 10
+    static let large: CGFloat = 20
     static let xl: CGFloat = 16
     static let full: CGFloat = 999
 }
@@ -127,10 +129,10 @@ enum ShelfShadow {
     )
 
     static let cardShadow = Config(
-        color: .black.opacity(0.06),
-        radius: 8,
+        color: .black.opacity(0.04),
+        radius: 12,
         x: 0,
-        y: 2
+        y: 3
     )
 
     static let elevatedShadow = Config(

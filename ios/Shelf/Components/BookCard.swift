@@ -40,6 +40,7 @@ struct BookCard: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
+        .pressable()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)
     }

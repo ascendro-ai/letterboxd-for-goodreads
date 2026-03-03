@@ -1,63 +1,47 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var selectedTab: Tab = .feed
+    @State private var selectedTab: AppTab = .shelves
     @Environment(DeepLinkHandler.self) private var deepLinkHandler
     @State private var deepLinkBookID: UUID?
-
-    enum Tab: String, CaseIterable {
-        case feed, search, log, notifications, profile
-
-        var title: String {
-            switch self {
-            case .feed: "Feed"
-            case .search: "Search"
-            case .log: "Log"
-            case .notifications: "Notifications"
-            case .profile: "Profile"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .feed: "book"
-            case .search: "magnifyingglass"
-            case .log: "square.and.pencil"
-            case .notifications: "bell"
-            case .profile: "person.crop.rectangle.stack"
-            }
-        }
-
-        var selectedIcon: String {
-            switch self {
-            case .feed: "book.fill"
-            case .search: "magnifyingglass"
-            case .log: "square.and.pencil"
-            case .notifications: "bell.fill"
-            case .profile: "person.crop.rectangle.stack.fill"
-            }
-        }
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             OfflineBannerView()
 
-            TabView(selection: $selectedTab) {
-                ForEach(Tab.allCases, id: \.self) { tab in
-                    tabContent(for: tab)
-                        .tabItem {
-                            Label(tab.title, systemImage: selectedTab == tab ? tab.selectedIcon : tab.icon)
-                        }
-                        .tag(tab)
+            ZStack(alignment: .bottom) {
+                // Tab content — ZStack with opacity preserves scroll position and state
+                ZStack {
+                    NavigationStack {
+                        ShelvesHomeView()
+                            .navigationDestination(item: $deepLinkBookID) { bookID in
+                                BookDetailView(bookID: bookID)
+                            }
+                    }
+                    .opacity(selectedTab == .shelves ? 1 : 0)
+                    .accessibilityHidden(selectedTab != .shelves)
+
+                    NavigationStack {
+                        SearchView()
+                    }
+                    .opacity(selectedTab == .search ? 1 : 0)
+                    .accessibilityHidden(selectedTab != .search)
+
+                    NavigationStack {
+                        LogView()
+                    }
+                    .opacity(selectedTab == .log ? 1 : 0)
+                    .accessibilityHidden(selectedTab != .log)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                CustomTabBar(selectedTab: $selectedTab)
             }
-            .tint(ShelfColors.accent)
         }
         .onChange(of: deepLinkHandler.pendingBookID) { _, bookID in
             if let bookID {
                 deepLinkBookID = bookID
-                selectedTab = .feed
+                selectedTab = .shelves
                 deepLinkHandler.clearPending()
             }
         }
@@ -65,35 +49,6 @@ struct ContentView: View {
             if query != nil {
                 selectedTab = .search
                 deepLinkHandler.clearPending()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func tabContent(for tab: Tab) -> some View {
-        switch tab {
-        case .feed:
-            NavigationStack {
-                FeedView()
-                    .navigationDestination(item: $deepLinkBookID) { bookID in
-                        BookDetailView(bookID: bookID)
-                    }
-            }
-        case .search:
-            NavigationStack {
-                SearchView()
-            }
-        case .log:
-            NavigationStack {
-                LogView()
-            }
-        case .notifications:
-            NavigationStack {
-                NotificationsView()
-            }
-        case .profile:
-            NavigationStack {
-                MyProfileView()
             }
         }
     }

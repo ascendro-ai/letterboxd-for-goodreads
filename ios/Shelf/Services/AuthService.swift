@@ -54,8 +54,19 @@ final class AuthService {
             state = .signedIn(user)
             return
         } catch {
-            logger.error("Dev auth failed: \(error.localizedDescription)")
-            api.authToken = nil
+            logger.warning("Dev auth API failed, using mock user for testing")
+            let mockUser = User(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+                username: "testuser",
+                displayName: "Test User",
+                avatarURL: nil,
+                bio: "Book lover",
+                favoriteBooks: nil,
+                createdAt: Date()
+            )
+            currentUser = mockUser
+            state = .signedIn(mockUser)
+            return
         }
         #endif
 

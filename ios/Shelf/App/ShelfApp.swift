@@ -59,21 +59,6 @@ struct ShelfApp: App {
     }
 
     private func configureAppearance() {
-        // Tab bar
-        let tabAppearance = UITabBarAppearance()
-        tabAppearance.configureWithOpaqueBackground()
-        tabAppearance.backgroundColor = UIColor(ShelfColors.surface)
-        tabAppearance.stackedLayoutAppearance.selected.iconColor = UIColor(ShelfColors.accent)
-        tabAppearance.stackedLayoutAppearance.selected.titleTextAttributes = [
-            .foregroundColor: UIColor(ShelfColors.accent)
-        ]
-        tabAppearance.stackedLayoutAppearance.normal.iconColor = UIColor(ShelfColors.textTertiary)
-        tabAppearance.stackedLayoutAppearance.normal.titleTextAttributes = [
-            .foregroundColor: UIColor(ShelfColors.textTertiary)
-        ]
-        UITabBar.appearance().standardAppearance = tabAppearance
-        UITabBar.appearance().scrollEdgeAppearance = tabAppearance
-
         // Navigation bar
         let navAppearance = UINavigationBarAppearance()
         navAppearance.configureWithOpaqueBackground()

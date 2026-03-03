@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Card Modifier
 
 struct ShelfCardModifier: ViewModifier {
-    var padding: CGFloat = ShelfSpacing.lg
+    var padding: CGFloat = ShelfSpacing.xxl
 
     func body(content: Content) -> some View {
         content
@@ -87,10 +87,22 @@ struct ShelfPageBackgroundModifier: ViewModifier {
     }
 }
 
+// MARK: - Frosted Glass Modifier
+
+struct FrostedGlassModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(.ultraThinMaterial)
+            .overlay(
+                ShelfColors.surface.opacity(0.05)
+            )
+    }
+}
+
 // MARK: - View Extensions
 
 extension View {
-    func shelfCard(padding: CGFloat = ShelfSpacing.lg) -> some View {
+    func shelfCard(padding: CGFloat = ShelfSpacing.xxl) -> some View {
         modifier(ShelfCardModifier(padding: padding))
     }
 
@@ -112,6 +124,18 @@ extension View {
 
     func shelfPageBackground() -> some View {
         modifier(ShelfPageBackgroundModifier())
+    }
+
+    func frostedGlass() -> some View {
+        modifier(FrostedGlassModifier())
+    }
+
+    func pressable() -> some View {
+        modifier(PressableModifier())
+    }
+
+    func springNavigation() -> some View {
+        modifier(SpringNavigationModifier())
     }
 }
 
