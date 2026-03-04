@@ -3,13 +3,12 @@ import SwiftUI
 // MARK: - App Tab
 
 enum AppTab: Int, CaseIterable {
-    case shelves, search, log
+    case shelves, search
 
     var icon: String {
         switch self {
         case .shelves: "books.vertical"
         case .search: "magnifyingglass"
-        case .log: "plus.circle"
         }
     }
 
@@ -17,7 +16,6 @@ enum AppTab: Int, CaseIterable {
         switch self {
         case .shelves: "books.vertical.fill"
         case .search: "magnifyingglass"
-        case .log: "plus.circle.fill"
         }
     }
 
@@ -25,7 +23,6 @@ enum AppTab: Int, CaseIterable {
         switch self {
         case .shelves: "Shelves"
         case .search: "Search"
-        case .log: "Log"
         }
     }
 }

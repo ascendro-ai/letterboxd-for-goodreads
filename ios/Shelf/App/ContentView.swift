@@ -27,11 +27,6 @@ struct ContentView: View {
                     .opacity(selectedTab == .search ? 1 : 0)
                     .accessibilityHidden(selectedTab != .search)
 
-                    NavigationStack {
-                        LogView()
-                    }
-                    .opacity(selectedTab == .log ? 1 : 0)
-                    .accessibilityHidden(selectedTab != .log)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
